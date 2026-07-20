@@ -1,0 +1,330 @@
+package mcp
+
+import "encoding/json"
+
+// toolDefinitions returns the MCP tool schemas.
+func toolDefinitions() []Tool {
+	return []Tool{
+		{
+			Name:        "memory_store",
+			Description: "Store an entry in memory. Entries are the fundamental unit — everything is an entry differentiated by tags. Use for decisions, summaries, insights, observations, or any information worth preserving across sessions.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"content": map[string]interface{}{
+						"type":        "string",
+						"description": "The content to store. Should be concise and self-contained.",
+					},
+					"tags": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Tags for this entry. Use for tracks (track:project-name), summaries (summary:session:id), topics (medical, architecture), temporal (day:2026-07-16), or any other categorization.",
+					},
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional ID. Auto-generated if not provided.",
+					},
+				},
+				"required": []string{"content", "tags"},
+			}),
+		},
+		{
+			Name:        "memory_search",
+			Description: "Full-text search across all memory entries. Returns entries ranked by relevance.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query": map[string]interface{}{
+						"type":        "string",
+						"description": "Search query (full-text).",
+					},
+					"limit": map[string]interface{}{
+						"type":        "number",
+						"description": "Max results to return. Default 10.",
+					},
+				},
+				"required": []string{"query"},
+			}),
+		},
+		{
+			Name:        "memory_by_tags",
+			Description: "Retrieve entries by tags. Supports intersection (all tags must match) or union (any tag matches). Use for browsing tracks, finding cross-pollination between topics, or pulling summaries at a specific level.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"tags": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Tags to filter by.",
+					},
+					"match_all": map[string]interface{}{
+						"type":        "boolean",
+						"description": "If true (default), entries must have ALL tags. If false, entries with ANY of the tags are returned.",
+					},
+					"limit": map[string]interface{}{
+						"type":        "number",
+						"description": "Max results. Default 20.",
+					},
+					"offset": map[string]interface{}{
+						"type":        "number",
+						"description": "Pagination offset. Default 0.",
+					},
+				},
+				"required": []string{"tags"},
+			}),
+		},
+		{
+			Name:        "memory_add_tags",
+			Description: "Add tags to an existing entry. Use for retroactive tagging, applying new categories, or linking entries to tracks/summaries.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Entry ID to tag.",
+					},
+					"tags": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Tags to add.",
+					},
+				},
+				"required": []string{"id", "tags"},
+			}),
+		},
+		{
+			Name:        "memory_remove_tags",
+			Description: "Remove tags from an existing entry.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Entry ID.",
+					},
+					"tags": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Tags to remove.",
+					},
+				},
+				"required": []string{"id", "tags"},
+			}),
+		},
+		{
+			Name:        "memory_list_tags",
+			Description: "List all tags in the memory system with entry counts. Useful for discovering what's stored and browsing the tag taxonomy.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			}),
+		},
+		{
+			Name:        "memory_get",
+			Description: "Retrieve a specific entry by ID.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Entry ID to retrieve.",
+					},
+				},
+				"required": []string{"id"},
+			}),
+		},
+		{
+			Name:        "memory_delete",
+			Description: "Delete an entry by ID. Removes it from all tag sets and the timeline.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Entry ID to delete.",
+					},
+				},
+				"required": []string{"id"},
+			}),
+		},
+		{
+			Name:        "memory_time_range",
+			Description: "Retrieve entries within a time window, optionally filtered by tags. Useful for pulling context from a specific period.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"start": map[string]interface{}{
+						"type":        "number",
+						"description": "Start timestamp (Unix seconds).",
+					},
+					"end": map[string]interface{}{
+						"type":        "number",
+						"description": "End timestamp (Unix seconds).",
+					},
+					"tags": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Optional tag filter (entries must have all specified tags).",
+					},
+					"limit": map[string]interface{}{
+						"type":        "number",
+						"description": "Max results. Default 20.",
+					},
+				},
+				"required": []string{"start", "end"},
+			}),
+		},
+		{
+			Name:        "memory_link",
+			Description: "Create a bidirectional associative link between two entries. Score ranges from -1.0 (anti-relevant: 'we tried this, it failed') to +1.0 (strongly relevant: 'this directly supports/extends that'). Links persist across sessions and are followed during recall.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id_a": map[string]interface{}{
+						"type":        "string",
+						"description": "First entry ID.",
+					},
+					"id_b": map[string]interface{}{
+						"type":        "string",
+						"description": "Second entry ID.",
+					},
+					"score": map[string]interface{}{
+						"type":        "number",
+						"description": "Associativity score from -1.0 to +1.0. Positive = relevant/supporting. Negative = anti-relevant/contradicting/superseded.",
+					},
+					"relation_type": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional relation type: supports, contradicts, extends, preceded_by. Omit for untyped links.",
+					},
+				},
+				"required": []string{"id_a", "id_b", "score"},
+			}),
+		},
+		{
+			Name:        "memory_unlink",
+			Description: "Remove a bidirectional link between two entries.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id_a": map[string]interface{}{
+						"type":        "string",
+						"description": "First entry ID.",
+					},
+					"id_b": map[string]interface{}{
+						"type":        "string",
+						"description": "Second entry ID.",
+					},
+				},
+				"required": []string{"id_a", "id_b"},
+			}),
+		},
+		{
+			Name:        "memory_links",
+			Description: "Retrieve all associative links for an entry, sorted by |score| descending (strongest signal first, positive or negative).",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Entry ID to get links for.",
+					},
+				},
+				"required": []string{"id"},
+			}),
+		},
+		{
+			Name:        "memory_rename_tag",
+			Description: "Rename a tag across all entries that have it. Updates every entry's tag string, moves members between tag sets, and updates the global tag registry.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"old_tag": map[string]interface{}{
+						"type":        "string",
+						"description": "The existing tag to rename.",
+					},
+					"new_tag": map[string]interface{}{
+						"type":        "string",
+						"description": "The new tag name.",
+					},
+				},
+				"required": []string{"old_tag", "new_tag"},
+			}),
+		},
+		{
+			Name:        "memory_ingest_url",
+			Description: "Ingest a web page into memory. Fetches the URL, extracts readable content (reader mode), scans for prompt injection, chunks if needed, and stores as a two-stage entry: a stub (auto-recalled with metadata) + full content entries (on-demand, untrusted). The stub contains a pointer to the full content which can be loaded with memory_get when needed.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"url": map[string]interface{}{
+						"type":        "string",
+						"description": "The URL to fetch and ingest.",
+					},
+					"tags": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Tags to apply to the ingested entries (in addition to automatic source:web and url:* tags).",
+					},
+					"title_override": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional: override the extracted title with a custom one.",
+					},
+				},
+				"required": []string{"url"},
+			}),
+		},
+		{
+			Name:        "memory_store_chunked",
+			Description: "Store large content by auto-splitting into chunks. Each chunk is stored as a separate entry tagged with task:<id>:chunk:<N>. Returns a manifest with the task ID, chunk count, and chunk IDs. Designed for subagent workflows where intermediate results need to be passed between pipeline stages via shared memory.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"content": map[string]interface{}{
+						"type":        "string",
+						"description": "The content to store. Will be split into chunks if it exceeds max_chunk_size.",
+					},
+					"task_id": map[string]interface{}{
+						"type":        "string",
+						"description": "A unique task identifier. Used to namespace chunks (task:<id>:chunk:<N>). If not provided, one is auto-generated.",
+					},
+					"tags": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Additional tags to apply to all chunk entries.",
+					},
+					"max_chunk_size": map[string]interface{}{
+						"type":        "number",
+						"description": "Maximum characters per chunk. Default 4000. Splits at line boundaries.",
+					},
+				},
+				"required": []string{"content"},
+			}),
+		},
+		{
+			Name:        "memory_get_section",
+			Description: "Retrieve a specific chunk from a chunked task by index. Use after memory_store_chunked to read back specific sections. Provide the task_id and chunk index (0-based).",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"task_id": map[string]interface{}{
+						"type":        "string",
+						"description": "The task ID used when storing (from the manifest returned by memory_store_chunked).",
+					},
+					"index": map[string]interface{}{
+						"type":        "number",
+						"description": "Chunk index (0-based). Use -1 to retrieve all chunks concatenated.",
+					},
+				},
+				"required": []string{"task_id", "index"},
+			}),
+		},
+	}
+}
+
+func mustJSON(v interface{}) json.RawMessage {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return data
+}

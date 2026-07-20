@@ -1,0 +1,36 @@
+# Compiled binaries
+bin/
+app
+hook
+slack
+*.exe
+
+# Build artifacts (third-party binaries — download or build locally)
+build/redis-server
+build/redis-cli
+build/ollama
+build/redisearch.so
+build/libssl.3.dylib
+build/libcrypto.3.dylib
+
+# Distribution
+dist/
+
+# macOS
+.DS_Store
+*.dmg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Test artifacts
+/tmp/
+
+# Config files with secrets
+config.json
+*.pem
+*.key
+*.crt

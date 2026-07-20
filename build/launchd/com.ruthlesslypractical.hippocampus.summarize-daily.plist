@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ruthlesslypractical.hippocampus.summarize-daily</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__SUMMARIZE_PATH__</string>
+        <string>--config</string>
+        <string>__CONFIG_PATH__</string>
+        <string>--daily</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/summarize-daily.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/summarize-daily.log</string>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
