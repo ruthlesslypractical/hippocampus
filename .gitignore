@@ -1,8 +1,8 @@
 # Compiled binaries
 bin/
 app
-hook
-slack
+/hook
+/slack
 *.exe
 
 # Build artifacts (third-party binaries — download or build locally)
