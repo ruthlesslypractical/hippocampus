@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Ruthlessly Practical LLC. All rights reserved.
+// Use of this source code is governed by a BSD-3-Clause license
+// that can be found in the LICENSE file.
+
 package memory
 
 import "context"
@@ -54,6 +58,10 @@ type Store interface {
 	// RenameTag renames a tag across all entries. Moves members between tag sets,
 	// updates each entry's tag string, and updates the global tag registry.
 	RenameTag(ctx context.Context, oldTag, newTag string) (int, error)
+
+	// Recent returns the N most recent entries from the timeline (newest first).
+	// No timestamp math required — just tail the timeline ZSET.
+	Recent(ctx context.Context, limit int) ([]Entry, error)
 
 	// Close releases resources.
 	Close() error

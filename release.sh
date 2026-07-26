@@ -23,7 +23,13 @@ set -e
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/Hippocampus.app"
-VERSION=$(grep 'const Version' internal/config/config.go | sed 's/.*"\(.*\)"/\1/')
+VERSION=$(grep 'var Version' internal/config/config.go | sed 's/.*"\(.*\)"/\1/')
+# If config.go has the dev placeholder, fall back to git tag
+if [ -z "$VERSION" ] || [ "$VERSION" = "0.0.0-dev" ]; then
+    VERSION=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
+fi
+# Allow explicit override
+VERSION="${HIPPOCAMPUS_VERSION:-$VERSION}"
 DMG_NAME="Hippocampus-${VERSION}.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
 SIGN_IDENTITY="${CODESIGN_IDENTITY:--}"

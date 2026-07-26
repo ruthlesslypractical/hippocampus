@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Ruthlessly Practical LLC. All rights reserved.
+// Use of this source code is governed by a BSD-3-Clause license
+// that can be found in the LICENSE file.
+
 package mcp
 
 import "encoding/json"
@@ -175,6 +179,19 @@ func toolDefinitions() []Tool {
 			}),
 		},
 		{
+			Name:        "memory_recent",
+			Description: "Retrieve the N most recent entries from the timeline (newest first). No timestamp math needed — just returns the tail of the timeline. Use this instead of memory_time_range when you want 'what just happened' without computing Unix timestamps.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"limit": map[string]interface{}{
+						"type":        "number",
+						"description": "Number of recent entries to return. Default 10.",
+					},
+				},
+			}),
+		},
+		{
 			Name:        "memory_link",
 			Description: "Create a bidirectional associative link between two entries. Score ranges from -1.0 (anti-relevant: 'we tried this, it failed') to +1.0 (strongly relevant: 'this directly supports/extends that'). Links persist across sessions and are followed during recall.",
 			InputSchema: mustJSON(map[string]interface{}{
@@ -316,6 +333,82 @@ func toolDefinitions() []Tool {
 					},
 				},
 				"required": []string{"task_id", "index"},
+			}),
+		},
+		{
+			Name:        "memory_classify",
+			Description: "Classify a single entry into one or more project tracks using windowed session context. Returns proposed tracks and confidence. Uses track manifests for disambiguation.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Entry ID to classify.",
+					},
+					"force": map[string]interface{}{
+						"type":        "boolean",
+						"description": "If true, reclassify even if already classified. Default false.",
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "If true, return proposed classification without applying it.",
+					},
+				},
+				"required": []string{"id"},
+			}),
+		},
+		{
+			Name:        "memory_classify_range",
+			Description: "Classify all unclassified entries in a time range or session. Uses windowed context and track manifests. Supports force mode to reclassify already-classified entries.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"start": map[string]interface{}{
+						"type":        "number",
+						"description": "Start timestamp (Unix seconds).",
+					},
+					"end": map[string]interface{}{
+						"type":        "number",
+						"description": "End timestamp (Unix seconds).",
+					},
+					"session": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional: classify entries in a specific session instead of a time range.",
+					},
+					"force": map[string]interface{}{
+						"type":        "boolean",
+						"description": "If true, reclassify even if already classified. Default false.",
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "If true, return proposed classifications without applying them.",
+					},
+				},
+			}),
+		},
+		{
+			Name:        "memory_reclassify",
+			Description: "Re-examine existing classifications. Strips auto-assigned track tags and re-classifies using improved context. Skips manually corrected entries (classified without classified:auto).",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"start": map[string]interface{}{
+						"type":        "number",
+						"description": "Start timestamp (Unix seconds).",
+					},
+					"end": map[string]interface{}{
+						"type":        "number",
+						"description": "End timestamp (Unix seconds).",
+					},
+					"tag": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional: only reclassify entries with this tag (e.g., 'classified:confused').",
+					},
+					"dry_run": map[string]interface{}{
+						"type":        "boolean",
+						"description": "If true, return proposed reclassifications without applying them.",
+					},
+				},
 			}),
 		},
 	}

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Ruthlessly Practical LLC. All rights reserved.
+// Use of this source code is governed by a BSD-3-Clause license
+// that can be found in the LICENSE file.
+
 // Package safeguard provides content scanning for prompt injection detection.
 // This is Layer 2 of the security model: heuristic detection of adversarial content
 // that might attempt to manipulate an LLM when recalled from memory.

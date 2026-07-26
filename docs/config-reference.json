@@ -1,0 +1,173 @@
+{
+  "redis": {
+    "addr": "localhost:6379",
+    "password": "",
+    "username": "",
+    "db": 0,
+    "tls": false,
+    "tls_cert": "",
+    "tls_key": "",
+    "tls_ca": "",
+    "tls_insecure": false,
+    "max_retries": 3,
+    "dial_timeout_s": 5,
+    "pool_size": 10
+  },
+  "memory": {
+    "max_search_results": 20,
+    "recall_max_chars": 8000,
+    "recall_max_entries": 10,
+    "recall_scan_depth": 100,
+    "store_max_chars": 0,
+    "store_min_prompt_len": 20,
+    "store_min_response_len": 100,
+    "decay_half_life_days": 30,
+    "relevance_floor": 0.05,
+    "global_summary_max_chars": 4000,
+    "summarize_max_entries": 200,
+    "summarize_max_input_chars": 50000,
+    "classify_max_chars": 500,
+    "cross_track_max_chars": 3000
+  },
+  "ollama": {
+    "base_url": "http://localhost:11434",
+    "model": "qwen3:32b",
+    "timeout_minutes": 10,
+    "wedge_timeout_seconds": 90,
+    "max_retries": 2,
+    "embedding_model": "nomic-embed-text",
+    "embedding_dimensions": 768
+  },
+  "ingest": {
+    "reject_threshold": 0.8,
+    "sanitize_threshold": 0.5,
+    "safety_threshold": 0.5,
+    "density_ratio": 0.3,
+    "density_min_count": 3,
+    "web_content_weight": 0.3,
+    "stub_weight": 0.6,
+    "fetch_timeout_s": 30,
+    "max_body_bytes": 10485760,
+    "user_agent": "",
+    "max_chunk_size": 3000,
+    "min_chunk_size": 200
+  },
+  "consolidation": {
+    "pairs_per_run": 5,
+    "min_score": 0.4,
+    "drift_delta": 0.2,
+    "cycle_pause_s": 600,
+    "max_entries": 500,
+    "content_truncation": 500,
+    "min_content_length": 50,
+    "temperature": 0.1,
+    "max_tokens": 200,
+    "eval_timeout_s": 60,
+    "cooldown_ttl_s": 3600,
+    "discovery_min_len": 200
+  },
+  "hook": {
+    "timeout_s": 10,
+    "boot_phase_ttl_h": 24,
+    "max_link_hops": 3,
+    "hook_timeout_ms": 10000,
+    "link_budget_chars": 3000,
+    "link_budget_entries": 3,
+    "min_link_follow_score": 0.3,
+    "tier2_max_chars": 300,
+    "tier3_snippet_chars": 80,
+    "vibe_max_exchanges": 6,
+    "vibe_truncate_chars": 200
+  },
+  "mcp": {
+    "default_search_limit": 10,
+    "default_tag_limit": 20,
+    "default_time_range_limit": 20
+  },
+  "slack": {
+    "bot_token": "",
+    "app_token": "",
+    "channels": []
+  },
+  "log": {
+    "log_dir": "",
+    "level": "info",
+    "debug_file": false,
+    "also_stderr": true
+  },
+  "working_set": {
+    "enabled": false,
+    "model": "qwen3:1.7b",
+    "max_bullets": 5,
+    "max_chars": 500,
+    "timeout_s": 120,
+    "inherit_ttl_h": 24
+  },
+  "ofc": {
+    "enabled": false,
+    "model": "qwen3:8b",
+    "classify_timeout_s": 3,
+    "da_decay": 0.95,
+    "sht_decay": 0.98,
+    "sht_baseline": 0.5,
+    "da_explicit_positive": 0.08,
+    "da_explicit_negative": -0.12,
+    "da_implicit_positive": 0.03,
+    "da_implicit_negative": -0.05,
+    "sht_positive": 0.03,
+    "sht_negative": -0.04
+  },
+  "epistemic": {
+    "max_text_len": 3000,
+    "max_vocab_terms": 50,
+    "min_entry_len": 50,
+    "max_keywords": 30,
+    "min_keyword_len": 4,
+    "min_encounters": 3,
+    "max_verify_batch": 20,
+    "auto_prune_conf": 0.90,
+    "reinforce_boost": 0.05,
+    "source_context_max": 500,
+    "max_source_entries": 5,
+    "warning_conf_min": 0.70,
+    "warning_min_keys": 2,
+    "max_warnings": 5,
+    "evidence_trunc": 80,
+    "vague_max_len": 6
+  },
+  "daemon": {
+    "enabled": false,
+    "gpu_concurrency": 2,
+    "queue_key": "ingest:queue",
+    "backlog_batch": 50,
+    "backlog_pause_s": 5,
+    "corecall_threshold": 3,
+    "recalled_ttl_h": 24,
+    "idle_poll_s": 2,
+    "self_update_check_s": 30,
+    "failure_threshold": 3,
+    "max_backoff_s": 3600,
+    "backoff_base_s": 10,
+    "classifier": {
+      "enabled": true
+    },
+    "extractor": {
+      "enabled": true
+    },
+    "verifier": {
+      "enabled": true
+    },
+    "linker": {
+      "enabled": true
+    },
+    "condenser": {
+      "enabled": true,
+      "min_user_chars": 300,
+      "min_assistant_chars": 1500,
+      "min_other_chars": 500,
+      "max_output_chars": 250,
+      "max_input_chars": 2000
+    }
+  },
+  "author": ""
+}

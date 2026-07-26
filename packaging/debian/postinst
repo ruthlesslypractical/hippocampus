@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+# Create log directory
+mkdir -p /var/log/hippocampus
+
+# Enable and start services
+if [ "$1" = "configure" ]; then
+    systemctl daemon-reload || true
+    systemctl enable hippocampus-daemon.service || true
+    systemctl enable hippocampus-summarize.timer || true
+    systemctl start hippocampus-daemon.service || true
+    systemctl start hippocampus-summarize.timer || true
+fi
