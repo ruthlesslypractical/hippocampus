@@ -1,0 +1,42 @@
+#!/usr/bin/make -f
+export DH_VERBOSE = 1
+export GOFLAGS = -trimpath
+
+VERSION := $(shell grep 'var Version' internal/config/config.go | sed 's/.*"\(.*\)"/\1/')
+LDFLAGS := -s -w -X 'github.com/ruthlesslypractical/hippocampus/internal/config.Version=$(VERSION)'
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/hippocampus-mcp ./cmd/mcp-server/
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/hippocampus-hook ./cmd/hook/
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/hippocampus-daemon ./cmd/daemon/
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/hippocampus-summarize ./cmd/summarize/
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/hippocampus-slack ./cmd/slack/
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/hippocampus-admin ./cmd/admin/
+
+override_dh_auto_install:
+	install -d $(CURDIR)/debian/hippocampus/usr/bin
+	install -m 755 bin/hippocampus-mcp $(CURDIR)/debian/hippocampus/usr/bin/
+	install -m 755 bin/hippocampus-hook $(CURDIR)/debian/hippocampus/usr/bin/
+	install -m 755 bin/hippocampus-daemon $(CURDIR)/debian/hippocampus/usr/bin/
+	install -m 755 bin/hippocampus-summarize $(CURDIR)/debian/hippocampus/usr/bin/
+	install -m 755 bin/hippocampus-slack $(CURDIR)/debian/hippocampus/usr/bin/
+	install -m 755 bin/hippocampus-admin $(CURDIR)/debian/hippocampus/usr/bin/
+	# Config
+	install -d $(CURDIR)/debian/hippocampus/etc/hippocampus
+	install -m 644 docs/config-reference.json $(CURDIR)/debian/hippocampus/etc/hippocampus/config.json
+	# Docs
+	install -d $(CURDIR)/debian/hippocampus/usr/share/doc/hippocampus
+	install -m 644 README.md $(CURDIR)/debian/hippocampus/usr/share/doc/hippocampus/ || true
+	install -m 644 docs/OVERVIEW.md $(CURDIR)/debian/hippocampus/usr/share/doc/hippocampus/ || true
+
+override_dh_auto_test:
+	# Skip tests during package build (requires live Redis)
+
+override_dh_dwz:
+	# Don't run dwz on Go binaries
+
+override_dh_strip:
+	# Don't strip Go binaries (breaks them)

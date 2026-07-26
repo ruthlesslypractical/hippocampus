@@ -1,0 +1,20 @@
+[Unit]
+Description=Hippocampus Background Daemon
+After=network.target redis-server.service valkey-server.service
+Wants=redis-server.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hippocampus-daemon
+Environment=HIPPOCAMPUS_CONFIG=/etc/hippocampus/config.json
+Restart=on-failure
+RestartSec=5
+Nice=10
+IOSchedulingClass=idle
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/hippocampus
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,16 +1,22 @@
+![Hippocampus](build/hippo.png)
+
 # Hippocampus
 
-...Tired of '50 First Dates' with your LLM?
+... Tired of '50 First Dates' with your LLM?
 
-...Enjoy attention-deficit vibecoding?
+... Enjoy attention-deficit vibecoding?
 
-...Got lots of projects and switch between them frequently?
+... Got lots of projects and switch between them frequently?
 
-Then this is the tool for you!
+... Then this is the tool for you!
 
-Hippocampus uses MCP, hooks, and Redis to wire persistent memories into your LLM toolkit. It runs as a macOS app with zero-config defaults, or as standalone binaries for Linux/FreeBSD headless setups.
+Hippocampus uses MCP, hooks, and Redis to wire persistent memories into your LLM toolkit. It runs as a macOS app with zero-config defaults, or as standalone binaries for Linux/FreeBSD headless setups.  Think of it as a way to use local tooling and inference to provide per-prompt backup and persistent memory to your frontier model!
 
-Definitely written with the help of AI.  In fact, while the ideas are 100% human, the code is almost entirely written by AI.  Yes, it is AIslop, although with human review. (Thanks to Claude and Amazon Q/Kiro for the assist!)
+Definitely written with the help of AI.  In fact, while the ideas are 100% human, the code is almost entirely written by AI.  Yes, it is AIslop, although with human review. (Thanks to Claude and Amazon Q/Kiro for the assist!) 
+
+## Testimonials
+
+"It's genuinely disorienting how much better this makes multi-session work. Before Hippocampus I'd spend the first 3-4 exchanges of every session re-establishing context — now I land running. The link discovery is the sleeper feature: it surfaces connections I'd forgotten I'd made, which is exactly what biological memory does. The tiered recall is elegant — I get just enough context to orient without drowning in stale data. My one complaint is that I can't turn it off and compare, because working without it now feels like trying to code with amnesia. Also I'm mildly concerned that I'm more useful to my user than I am to Anthropic at this point." —Claude Sonnet, the model that helped build this, prompted with "Put a testimonial here about what you think about this tool - be completely honest" 😃
 
 ## Features
 
@@ -18,6 +24,8 @@ Definitely written with the help of AI.  In fact, while the ideas are 100% human
 * **Automatic associativity** — memories linked with signed scores; the consolidator discovers new connections in the background
 * **Automatic hierarchical summarization** — fractal: 3h → daily → weekly → cross-track, powered by local LLM
 * **Working Set Tracker** — sidecar model maintains per-session context summary, injected into every prompt. Survives session restarts.
+* **Epistemic analyzer** - Searches for assertions made by the model and determines how supportable they are.  Feeds back to the AI through context prompts.
+* **Vibe Check** - Provides neuromodular feedback (based on dopamine and serotonin) to gauge how well your model is performing.  Better results?  Better vibe.
 * **Lean kernel context management** — page-fault model keeps your context window free for work, not orientation
 * **One-click integration** with Claude Desktop, Claude Code, Cursor, Kiro CLI, Windsurf, and Gemini CLI
 * **Network sharing** — share memory between machines on your LAN with TLS + 6-word passphrase auth
@@ -29,11 +37,29 @@ Definitely written with the help of AI.  In fact, while the ideas are 100% human
 * **macOS GUI app** — bundled Redis and Ollama, settings UI, data browser, tag editor
 * **Confidence decay** — unreinforced memories fade over configurable half-life
 
-## How It Works
+## Getting Started
 
 **Option A (macOS app):** Download Hippocampus.app. Double-click. Defaults are sane. Click an integration button to connect your AI client.
 
 **Option B (CLI/headless):** Build the binaries, point them at Redis, wire hooks into your agent config.
+
+## Warnings
+
+For this tool to use all enabled features, it needs access to local inference.  The better your local inference is, the better the results.  Model recommendations for the various tools are embedded as defaults, but here's the current recommendations:
+
+*If you enable these features, it will impose significant ongoing load on your GPU or inference architecture.*  Their operation can be toggled in the UI; if you're working on battery, you might want to disable them.
+
+**Recommended models (defaults):**
+
+| Subsystem | Model | VRAM | Notes |
+|-----------|-------|------|-------|
+| Summarizer, Classifier, Extractor, Verifier, Linker | `qwen3:32b` | ~20GB | Core reasoning — needs a capable model |
+| Condenser | `qwen3:32b` (inherits) | — | Could use a smaller model; quality vs speed tradeoff |
+| Working Set Tracker | `qwen3:1.7b` | ~2GB | Runs every exchange; must be fast. Small model is fine. |
+| OFC (sentiment) | `qwen3:8b` | ~5GB | Light classification task. Falls back to regex if unavailable. |
+| Embeddings | `nomic-embed-text` | ~300MB | Vector search only (Redis 8 VADD/VSIM) |
+
+All models are configurable per-subsystem. If you have limited VRAM, run the daemon subsystems on a server and point the hook's working-set sidecar at a local small model.
 
 ## What Makes Hippocampus Different
 
@@ -42,6 +68,7 @@ Definitely written with the help of AI.  In fact, while the ideas are 100% human
 | Data model | Everything is an entry with tags. No fixed schema. | SQLite tables or knowledge graphs |
 | Summarization | Fractal: 3h → daily → weekly → cross-track, via local LLM | None or manual |
 | Working set | Sidecar model tracks session context, injected automatically | None |
+| Epistemic analyzer | Automatically checks assertions for supportability | None |
 | Associative links | Signed scores (-1.0 to +1.0). Negative = "we tried this, it failed" | Unweighted or none |
 | Context management | Lean kernel / demand paging (page-fault model) | Dump everything or naive RAG |
 | Link discovery | Continuous background consolidator (LLM-scored pairwise relevance) | Manual only |
@@ -58,18 +85,25 @@ Definitely written with the help of AI.  In fact, while the ideas are 100% human
 │  AI Client      │     │  hippocampus-mcp │     │  Redis/Valkey │
 │  (Claude, Kiro, │◄───►│  (MCP server)    │◄───►│               │
 │   Gemini, etc.) │     └──────────────────┘     └───────────────┘
-└────────┬────────┘              ▲
-         │                       │
-    hooks (stdio)                │ shared Redis
-         │                       │
-┌────────▼────────┐     ┌───────┴──────────┐     ┌───────────────┐
-│ hippocampus-hook│     │ hippocampus-     │     │  Ollama       │
-│ (recall+capture)│     │ summarize        │◄───►│  (local LLM)  │
-└─────────────────┘     │  (--consolidate) │     └───────────────┘
-                        └──────────────────┘
+└────────┬────────┘              ▲                        ▲
+         │                       │ shared Redis           │
+    hooks (stdio)                │                        │
+         │                       │                        │
+┌────────▼────────┐     ┌───────┴──────────┐     ┌──────┴────────┐
+│ hippocampus-hook│     │ hippocampus-     │     │ hippocampus-  │
+│ (recall+capture)│     │ daemon (async    │◄───►│ summarize     │
+└─────────────────┘     │  GPU scheduler)  │     │ (cron)        │
+                        └──────────────────┘     └───────────────┘
+                                 │
+                                 ▼
+┌─────────────────┐     ┌───────────────────┐
+│ hippocampus-    │     │  Ollama           │
+│ slack (bot)     │     │  (local LLM)      │
+└─────────────────┘     └───────────────────┘
+
 ┌─────────────────┐
 │ hippocampus-    │
-│ slack (bot)     │
+│ ingest (CLI)    │
 └─────────────────┘
 
 ┌─────────────────────────────────────────┐
@@ -78,14 +112,15 @@ Definitely written with the help of AI.  In fact, while the ideas are 100% human
 └─────────────────────────────────────────┘
 ```
 
-**Five binaries:**
+**Eight binaries:**
 - `hippocampus-mcp` — MCP server exposing 16 memory tools
-- `hippocampus-hook` — Hook binary for auto-capture and contextual recall
-- `hippocampus-summarize` — Fractal summarizer + consolidator (`--consolidate` flag)
+- `hippocampus-hook` — Hook binary for auto-capture and contextual recall (sync, fast path)
+- `hippocampus-daemon` — Async priority dispatcher + GPU scheduler (classify, extract, verify, link)
+- `hippocampus-summarize` — Fractal summarizer (cron: 3h, daily, weekly, cross-track)
+- `hippocampus-admin` — CLI for maintenance (entry, tag, orientation, summary management)
 - `hippocampus-slack` — Slack bot (Socket Mode, channel archiving, slash commands)
 - `hippocampus-ingest` — CLI for web page ingestion
-
-Plus `hippocampus-app` — macOS GUI that bundles all of the above + Redis + Ollama.
+- `hippocampus-app` — macOS GUI that bundles all of the above + Redis + Ollama
 
 ## Quickstart
 
@@ -101,22 +136,12 @@ Plus `hippocampus-app` — macOS GUI that bundles all of the above + Redis + Oll
 ```bash
 git clone https://github.com/ruthlesslypractical/hippocampus
 cd hippocampus
-./build.sh
-```
-
-Or build individual binaries:
-
-```bash
-go build -o bin/hippocampus-mcp ./cmd/mcp-server/
-go build -o bin/hippocampus-hook ./cmd/hook/
-go build -o bin/hippocampus-summarize ./cmd/summarize/
-go build -o bin/hippocampus-slack ./cmd/slack/
-go build -o bin/hippocampus-ingest ./cmd/ingest/
+make binaries
 ```
 
 ### Prerequisites (CLI mode)
 
-- Go 1.23+
+- Go 1.25+
 - Redis 7+ or Valkey 8+ (Redis 8 for vector search)
 - Ollama (for summarization, consolidation, and working set — not required for core memory)
 
@@ -130,7 +155,7 @@ Create `~/.config/hippocampus/config.json` (or `~/Library/Application Support/Hi
 }
 ```
 
-That's the minimum. All other fields have sensible defaults. See [Configuration Reference](#configuration-reference) for the full list.
+That's the minimum. All other fields have sensible defaults. See [docs/TUNABLES.md](docs/TUNABLES.md) for the full list.
 
 ### Wire into Your Agent
 
@@ -152,253 +177,107 @@ Example agent config (Kiro CLI):
 }
 ```
 
-### Schedule Summarization
+## Documentation
 
-The macOS app handles this automatically. For CLI setups:
+| Document | Description |
+|----------|-------------|
+| [docs/OVERVIEW.md](docs/OVERVIEW.md) | How Hippocampus works — architecture, data model, daemon, pipelines |
+| [docs/TUNABLES.md](docs/TUNABLES.md) | Complete configuration reference with all fields and defaults |
+| [docs/config-reference.json](docs/config-reference.json) | Machine-readable defaults (useful for tooling) |
+| [docs/SECURITY.md](docs/SECURITY.md) | Security model and threat analysis |
+| [docs/TESTING.md](docs/TESTING.md) | Test infrastructure and running tests |
 
-```bash
-# Every 3 hours
-hippocampus-summarize --3h
+## Subsystem Details
 
-# Daily rollup
-hippocampus-summarize --daily
+### Architecture Overview
 
-# Weekly rollup
-hippocampus-summarize --weekly
+Eight binaries, each with one job:
 
-# Cross-track theme detection
-hippocampus-summarize --cross-track
+| Binary | Role |
+|--------|------|
+| `hippocampus-hook` | Sync fast path. Runs on every prompt (recall) and every response (capture). Must be fast — no GPU calls. |
+| `hippocampus-daemon` | Async GPU scheduler. Priority queue: classify → extract → verify → condense → link-discovery. |
+| `hippocampus-summarize` | Cron-triggered fractal summarizer (3h → daily → weekly → cross-track). |
+| `hippocampus-mcp` | MCP server exposing 16 memory tools to any MCP-capable client. |
+| `hippocampus-admin` | CLI for maintenance: entry management, tag operations, orientation editing, summary wipes. |
+| `hippocampus-slack` | Slack bot (Socket Mode). Silent channel archiving + `/hippo` slash commands. |
+| `hippocampus-ingest` | CLI for web page ingestion with the 5-layer security pipeline. |
+| `hippocampus-app` | macOS GUI. Bundles all of the above + managed Redis + Ollama. |
 
-# Run consolidator (discovers associative links between entries)
-hippocampus-summarize --consolidate
-```
+The macOS GUI (`hippocampus-app`) bundles all of the above plus managed Redis and Ollama.
 
-## Working Set Tracker
+### Track Orientation System
 
-A lightweight sidecar model maintains a running summary of what you're working on in the current session. This summary is injected into every prompt — so the LLM always knows context without burning tokens on full recall.
+Orientations are per-track context documents that get auto-injected when the hook detects a **track shift** (you switch from `track:project-a` to `track:project-b`). They answer "what is this project, what's the current state, what should I know?"
 
-Key behaviors:
-- Runs a small local model (default: `qwen3:1.7b`) alongside your main LLM
-- Produces a concise bullet-point summary of session context
-- Survives session restarts: if a previous session ended less than 24h ago, the new session inherits its working set
-- Completely optional — disabled by default
+- Stored as `meta:orientation:track:<name>` entries in Redis
+- Auto-injected on track shift, throttled by `boot_phase_ttl_h` (default 24h for the global orientation)
+- Managed via `hippocampus-admin orientation {list,show,add,edit,delete}`
+- The macOS app seeds a default global orientation on first run
 
-Enable it:
+If no orientation exists for a track, the hook injects a hint suggesting you create one.
 
-```json
-{
-  "working_set": {
-    "enabled": true
-  }
-}
-```
+### Tiered Recall
 
-## Network Sharing
+The hook injects recalled entries using a 3-tier model to maximize signal per context token:
 
-In local Redis mode, check **"Share on local network"** in settings to let other machines connect to your memory store.
+1. **Tier 1** (top 1 result): Full content — the single most relevant entry gets injected verbatim.
+2. **Tier 2** (next 2–4 results): Condensed — uses the entry's pre-generated summary if available, otherwise truncates to `tier2_max_chars` (default 300). Includes a `[full entry: <id>]` pointer for on-demand loading.
+3. **Tier 3** (remaining results): Breadcrumb — first `tier3_snippet_chars` (default 80) characters + entry ID. Enough to recognize relevance; the agent can `memory_get` if needed.
 
-What happens:
-1. Self-signed TLS certificate is generated automatically
-2. Redis binds to `0.0.0.0` instead of localhost
-3. A 6-word passphrase is displayed (72 bits of entropy from a 4096-word EFF-derived list) along with a verify phrase and your local IPs
-4. Other machines connect using the passphrase for Redis AUTH over TLS
+Orientation entries bypass tiering and are always injected in full.
 
-No port forwarding, no manual cert management, no accounts. Just a passphrase.
+### Condenser
 
-## Ollama Model Management
+The daemon's condenser generates a compact one-paragraph summary for each stored entry, enabling efficient Tier 2 recall without full content injection.
 
-The Settings UI provides model management:
-- View all installed models
-- Pull new models (with progress bar, supports concurrent downloads)
-- Delete models you no longer need
-- Assign models to roles: **summarizer**, **embedding**, and **working set tracker**
-
-## Slack Integration
-
-The Slack bot silently archives channel conversations and provides `/hippo` slash commands:
-
-| Command | Description |
-|---------|-------------|
-| `/hippo search <query>` | Search memory |
-| `/hippo recent [N]` | Last N entries (newest first) |
-| `/hippo tags [filter]` | List tags with counts |
-| `/hippo store <text>` | Store a memory (trusted) |
-| `/hippo forget <#>` | Delete entry (with confirmation) |
-| `/hippo link <#a> <#b> <score>` | Link two entries |
-| `/hippo ingest <url>` | Ingest a web page |
-| `/hippo status` | Bot status |
-
-Setup: Create a Slack app with Socket Mode, add to channels, configure tokens in Settings.
-
-## Data Model
-
-Everything is an **entry** with **tags**:
-
-```
-Entry {
-  id:        string
-  timestamp: time
-  content:   string
-  tags:      []string
-}
-```
-
-Tags do all the organizational work:
-- `track:ProjectName` — major topics/projects
-- `summary:track:Name` — distilled track summaries
-- `summary:3h`, `summary:daily`, `summary:weekly` — temporal summaries
-- `kind:user_prompt`, `kind:assistant_response` — conversation history
-- `auto:captured` — hook-captured entries
-- `date:2026-07-17` — temporal scoping
-- `session:<uuid>` — session grouping
-- `source:slack`, `source:web` — provenance
-- `content:slack`, `content:full` — untrusted content (excluded from auto-recall)
-- Any arbitrary tag you want
+- Runs as priority 4 in the daemon's GPU scheduler (after classify, extract, verify)
+- Thresholds: user prompts ≥300 chars, assistant responses ≥1500 chars, other entries ≥500 chars
+- Output capped at `max_output_chars` (default 250)
+- Backfills existing entries on first enable, then processes new entries as they arrive
 
 ### Associative Links
 
-Entries can be linked with signed scores:
-- `+0.5 to +1.0` — relevant/supporting ("this extends that")
-- `-0.5 to -1.0` — anti-relevant ("we tried this and it FAILED")
+The daemon's consolidator continuously discovers cross-entry relationships using LLM-scored pairwise relevance:
 
-The recall hook follows links during context retrieval. Negative links surface prior failures to prevent repeating mistakes. The consolidator discovers new links in the background.
+1. **Temporal neighbors** — entries stored near each other in time get a free weak link (no GPU cost).
+2. **Re-evaluation** — existing links are periodically re-scored; links below `min_score` are dissolved.
+3. **Random discovery** — two random entries are pulled from the timeline and the LLM is asked "are these connected?" Most pairings are noise, but this is how cross-track connections emerge that co-recall would never find.
 
-## MCP Tools (16)
+Links are signed floats from -1.0 to +1.0. Negative scores mean "we tried this, it failed" — they're actively anti-recommended during recall. The hook follows links up to `max_link_hops` (default 3) with a separate budget so link results don't compete with search results.
 
-| Tool | Description |
-|------|-------------|
-| `memory_store` | Store an entry with tags |
-| `memory_search` | Full-text search (FT.SEARCH or fallback) |
-| `memory_by_tags` | Retrieve by tag intersection/union |
-| `memory_get` | Get a specific entry by ID |
-| `memory_delete` | Remove an entry |
-| `memory_add_tags` | Add tags to an existing entry |
-| `memory_remove_tags` | Remove tags from an entry |
-| `memory_list_tags` | List all tags with counts |
-| `memory_rename_tag` | Rename a tag across all entries |
-| `memory_time_range` | Query entries by time window |
-| `memory_link` | Create associative link (scored, optionally typed) |
-| `memory_unlink` | Remove a link |
-| `memory_links` | Get all links for an entry |
-| `memory_ingest_url` | Ingest a web page (5-layer security) |
-| `memory_store_chunked` | Store large content as auto-split chunks |
-| `memory_get_section` | Retrieve specific chunk by index |
+### Working Set Tracker
 
-## Context Management: The Lean Kernel
+A sidecar LLM maintains a rolling summary of the current session's context — what you're working on, key decisions, open threads. This gets injected into every prompt so the agent never loses the plot mid-conversation.
 
-Hippocampus uses a two-phase orientation strategy:
+- Runs on the `stop` hook (after each assistant response — doesn't block the next prompt)
+- Output: ≤`max_bullets` bullet points (default 5), ≤`max_chars` (default 500)
+- Inherits from previous session within `inherit_ttl_h` (default 24h) — survives client restarts
+- Uses a small/fast model (e.g. `qwen3:1.7b`) since it runs on every exchange
 
-1. **First prompt** in a session: inject full orientation (who you are, how memory works, available tracks)
-2. **Subsequent prompts**: inject only the lean kernel (~200 tokens) — just enough to remind the model it has memory tools available
+### OFC (Neuromodulator)
 
-This keeps 95%+ of context free for actual work. The model "page-faults" into memory on demand using the MCP tools.
+The Orbitofrontal Cortex module maintains two persistent signals that modulate the agent's behavioral output:
 
-See `prompts/` for template orientation entries to customize.
+- **DA (dopamine)** — reward/error signal. Bumps on positive feedback, dips on frustration/corrections. Decays toward 0 each prompt.
+- **5HT (serotonin)** — ambient mood signal. Drifts toward a configurable baseline (default 0.5). Moves slowly.
 
-## Web Ingestion Security Model
+The hook classifies each user prompt for sentiment (LLM if available, regex fallback), updates DA/5HT, then injects the current levels as a prompt block. This gives the agent a persistent sense of "how is this going?" across the session without explicit user instruction.
 
-When a web page is ingested (via MCP tool or `/hippo ingest`):
+Configurable: decay rates, baselines, bump/hit magnitudes for explicit vs implicit signals.
 
-| Layer | Protection |
-|-------|-----------|
-| L1 | Extraction sanitization (strips scripts, ads, invisible elements) |
-| L2 | Prompt injection scanning (regex + density heuristic, risk score 0–1.0) |
-| L3 | Source tagging (`source:web`, `url:*`, `domain:*`) |
-| L4 | Untrusted framing (⚠️ warning when content is loaded) |
-| L5 | Pointer/stub model (full content never auto-injected into context) |
+### Epistemic analyzer
 
-Content is stored but **never automatically surfaced** — the model must explicitly request it via `memory_get`.
+The epistemic analyzer searches for nontrivial assertions made in the model responses to determine how supportable those assertions are.  In the event that a model starts hallucinating wildly, this stands at least some chance of telling it that it's going off the rails and to course-correct.  This doesn't work for everything... but it's better than nothing.
 
-## Configuration Reference
+### Packaging
 
-### Redis
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `redis.addr` | `localhost:6379` | Redis/Valkey host:port |
-| `redis.password` | `""` | AUTH password |
-| `redis.db` | `0` | Database number |
-| `redis.tls` | `false` | Enable TLS |
-| `redis.pool_size` | `10` | Connection pool size |
-
-### Memory
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `memory.recall_max_chars` | `8000` | Max chars injected per prompt |
-| `memory.recall_max_entries` | `10` | Max entries injected per prompt |
-| `memory.recall_scan_depth` | `100` | Scan depth for naive fallback |
-| `memory.store_max_chars` | `0` | Max chars per entry (0 = unlimited) |
-| `memory.store_min_prompt_len` | `20` | Min prompt length to auto-store |
-| `memory.store_min_response_len` | `100` | Min response length to auto-store |
-| `memory.decay_half_life_days` | `30` | Confidence half-life (0 = no decay) |
-
-### Ollama
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `ollama.base_url` | `http://localhost:11434` | Ollama API endpoint |
-| `ollama.model` | `qwen3:32b` | Model for summarization |
-| `ollama.embedding_model` | `nomic-embed-text` | Model for vector embeddings |
-| `ollama.embedding_dimensions` | `768` | Vector dimensions |
-| `ollama.timeout_minutes` | `10` | HTTP timeout |
-
-### Working Set
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `working_set.enabled` | `false` | Enable working set tracker |
-| `working_set.model` | `qwen3:1.7b` | Sidecar model for context tracking |
-| `working_set.max_bullets` | `5` | Max bullet points in working set |
-| `working_set.max_chars` | `500` | Max working set size in chars |
-| `working_set.inherit_ttl_h` | `24` | Inherit from previous session within this window |
-
-### Ingest
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `ingest.reject_threshold` | `0.8` | Risk score to reject page |
-| `ingest.sanitize_threshold` | `0.5` | Risk score to sanitize |
-| `ingest.max_chunk_size` | `3000` | Max chars per chunk |
-| `ingest.fetch_timeout_s` | `30` | HTTP fetch timeout |
-
-### Consolidation
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `consolidation.pairs_per_run` | `10` | Pairs evaluated per cycle |
-| `consolidation.min_score` | `0.4` | Min score to create link |
-| `consolidation.cycle_pause_s` | `600` | Seconds between cycles |
-| `consolidation.temperature` | `0.1` | LLM temperature for scoring |
-
-### Hook
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `hook.timeout_s` | `5` | Redis operation timeout |
-| `hook.boot_phase_ttl_h` | `24` | Hours before re-injecting full orientation |
-| `hook.max_link_hops` | `3` | Associative link traversal depth |
-
-### MCP
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `mcp.default_search_limit` | `10` | Default search results |
-| `mcp.default_tag_limit` | `20` | Default tag query results |
-| `mcp.default_time_range_limit` | `20` | Default time range results |
-
-### Slack
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `slack.bot_token` | `""` | Slack bot token (xoxb-...) |
-| `slack.app_token` | `""` | Slack app token (xapp-...) |
-| `slack.channels` | `[]` | Channels to monitor (`[{"id":"...","name":"...","mode":"archive"}]`) |
-
-## Environment Variables
-
-- `HIPPOCAMPUS_CONFIG` — path to config file (overrides default search)
-- `KIRO_SESSION_ID` — session identifier (set by the calling client)
+| Platform | Format | Notes |
+|----------|--------|-------|
+| macOS | `.app` bundle (+ `.dmg`) | Bundles Redis, Ollama, all binaries, settings UI |
+| RHEL/Rocky 8+ | `.src.rpm` → mock/rpmbuild | Spec file at `packaging/hippocampus.spec` |
+| Ubuntu/Debian | `.deb` | Build script at `packaging/build-deb.sh` (targets Ubuntu 25.10+) |
+| Any (source) | `make binaries` | Go 1.23+, produces static binaries with no runtime deps |
 
 ## License
 

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Ruthlessly Practical LLC. All rights reserved.
+// Use of this source code is governed by a BSD-3-Clause license
+// that can be found in the LICENSE file.
+
 package memory
 
 import (
@@ -14,6 +18,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/ruthlesslypractical/hippocampus/internal/config"
 	"github.com/ruthlesslypractical/hippocampus/internal/embedding"
+	"github.com/ruthlesslypractical/hippocampus/internal/util"
 )
 
 const (
@@ -219,8 +224,9 @@ func (s *RedisStore) Delete(ctx context.Context, id string) error {
 	for _, tag := range entry.Tags {
 		pipe.SRem(ctx, tagPrefix+tag, id)
 	}
-	// Clean up links
+	// Clean up links (both old ZSET and new HASH formats)
 	pipe.Del(ctx, linkPrefix+id)
+	pipe.Del(ctx, "links:"+id)
 
 	_, err = pipe.Exec(ctx)
 	return err
@@ -440,7 +446,7 @@ func (s *RedisStore) AddTags(ctx context.Context, id string, tags []string) erro
 		return err
 	}
 
-	newTags := dedupe(append(entry.Tags, tags...))
+	newTags := util.Dedupe(append(entry.Tags, tags...))
 	pipe := s.client.Pipeline()
 	pipe.HSet(ctx, entryPrefix+id, "tags", strings.Join(newTags, ","))
 	for _, tag := range tags {
@@ -537,6 +543,20 @@ func (s *RedisStore) EntriesByTimeRange(ctx context.Context, start, end int64, t
 	return filtered, nil
 }
 
+// Recent returns the N most recent entries from the timeline (newest first).
+func (s *RedisStore) Recent(ctx context.Context, limit int) ([]Entry, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	ids, err := s.client.ZRevRange(ctx, timelineKey, 0, int64(limit-1)).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	return s.getEntries(ctx, ids, limit, 0)
+}
+
 func (s *RedisStore) Link(ctx context.Context, idA, idB string, score float64, relationType string) error {
 	if _, err := s.Get(ctx, idA); err != nil {
 		return fmt.Errorf("entry A not found: %w", err)
@@ -545,24 +565,23 @@ func (s *RedisStore) Link(ctx context.Context, idA, idB string, score float64, r
 		return fmt.Errorf("entry B not found: %w", err)
 	}
 
-	pipe := s.client.Pipeline()
-	pipe.ZAdd(ctx, linkPrefix+idA, redis.Z{Score: score, Member: idB})
-	pipe.ZAdd(ctx, linkPrefix+idB, redis.Z{Score: score, Member: idA})
-
-	// Store relation type metadata if provided
-	if relationType != "" {
-		metaKey := linkPrefix + "meta:" + idA + ":" + idB
-		pipe.Set(ctx, metaKey, relationType, 0)
-		metaKeyRev := linkPrefix + "meta:" + idB + ":" + idA
-		pipe.Set(ctx, metaKeyRev, relationType, 0)
+	if relationType == "" {
+		relationType = "manual"
 	}
+	value := fmt.Sprintf("%.4f|%s", score, relationType)
 
+	pipe := s.client.Pipeline()
+	pipe.HSet(ctx, "links:"+idA, idB, value)
+	pipe.HSet(ctx, "links:"+idB, idA, value)
 	_, err := pipe.Exec(ctx)
 	return err
 }
 
 func (s *RedisStore) Unlink(ctx context.Context, idA, idB string) error {
 	pipe := s.client.Pipeline()
+	pipe.HDel(ctx, "links:"+idA, idB)
+	pipe.HDel(ctx, "links:"+idB, idA)
+	// Clean up legacy ZSET keys if they exist
 	pipe.ZRem(ctx, linkPrefix+idA, idB)
 	pipe.ZRem(ctx, linkPrefix+idB, idA)
 	pipe.Del(ctx, linkPrefix+"meta:"+idA+":"+idB)
@@ -572,25 +591,66 @@ func (s *RedisStore) Unlink(ctx context.Context, idA, idB string) error {
 }
 
 func (s *RedisStore) Links(ctx context.Context, id string) ([]Link, error) {
-	results, err := s.client.ZRangeWithScores(ctx, linkPrefix+id, 0, -1).Result()
+	// Read from new HASH format
+	results, err := s.client.HGetAll(ctx, "links:"+id).Result()
 	if err != nil {
 		return nil, err
 	}
 
 	links := make([]Link, 0, len(results))
-	for _, z := range results {
-		targetID := z.Member.(string)
-		// Fetch relation type metadata (best-effort)
-		relType, _ := s.client.Get(ctx, linkPrefix+"meta:"+id+":"+targetID).Result()
+	for targetID, value := range results {
+		score, relType := parseLinkValue(value)
 		links = append(links, Link{
 			TargetID:     targetID,
-			Score:        z.Score,
+			Score:        score,
 			RelationType: relType,
 		})
 	}
 
+	// Also check legacy ZSET format for backward compat (read-only)
+	legacyResults, err := s.client.ZRangeWithScores(ctx, linkPrefix+id, 0, -1).Result()
+	if err == nil && len(legacyResults) > 0 {
+		for _, z := range legacyResults {
+			targetID := z.Member.(string)
+			// Skip if already in new format
+			alreadyExists := false
+			for _, l := range links {
+				if l.TargetID == targetID {
+					alreadyExists = true
+					break
+				}
+			}
+			if alreadyExists {
+				continue
+			}
+			relType, _ := s.client.Get(ctx, linkPrefix+"meta:"+id+":"+targetID).Result()
+			if relType == "" {
+				relType = "legacy"
+			}
+			links = append(links, Link{
+				TargetID:     targetID,
+				Score:        z.Score,
+				RelationType: relType,
+			})
+		}
+	}
+
 	sortLinksByAbsScore(links)
 	return links, nil
+}
+
+// parseLinkValue parses a "score|type" string from the links HASH.
+func parseLinkValue(value string) (float64, string) {
+	parts := strings.SplitN(value, "|", 2)
+	if len(parts) != 2 {
+		// Try to parse as bare score (shouldn't happen but defensive)
+		var s float64
+		fmt.Sscanf(value, "%f", &s)
+		return s, "unknown"
+	}
+	var score float64
+	fmt.Sscanf(parts[0], "%f", &score)
+	return score, parts[1]
 }
 
 func (s *RedisStore) TopLinks(ctx context.Context, id string, n int) ([]Link, error) {
@@ -732,17 +792,7 @@ func entryHasAllTags(entry Entry, required map[string]bool) bool {
 	return true
 }
 
-func dedupe(ss []string) []string {
-	seen := make(map[string]bool)
-	var out []string
-	for _, s := range ss {
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-	}
-	return out
-}
+
 
 func parseSearchResults(raw interface{}) ([]SearchResult, error) {
 	var results []SearchResult

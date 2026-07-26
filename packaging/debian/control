@@ -1,0 +1,26 @@
+Source: hippocampus
+Section: utils
+Priority: optional
+Maintainer: Theron Bair <tbair@ruthlesslypractical.com>
+Build-Depends: debhelper-compat (= 13), golang-go (>= 2:1.21~), git
+Standards-Version: 4.7.0
+Homepage: https://github.com/ruthlesslypractical/hippocampus
+Rules-Requires-Root: no
+Vcs-Git: https://github.com/ruthlesslypractical/hippocampus.git
+Vcs-Browser: https://github.com/ruthlesslypractical/hippocampus
+
+Package: hippocampus
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, redis-server (>= 6.0) | valkey-server (>= 7.0)
+Description: Persistent AI Memory System with LLM-powered analysis
+ Hippocampus is a persistent memory system for LLM-based AI assistants.
+ It provides automatic conversation capture, semantic search, epistemic
+ fact-checking, track classification, and associative link discovery.
+ .
+ Components:
+  - hippocampus-hook: Synchronous per-message capture and recall injection
+  - hippocampus-daemon: Background processor (classify, extract, verify, link)
+  - hippocampus-summarize: Fractal summarization (3h/daily/weekly/cross-track)
+  - hippocampus-mcp: MCP server (14 tools for memory management)
+  - hippocampus-slack: Slack channel archival bot
+  - hippocampus-admin: CLI admin tool for memory management

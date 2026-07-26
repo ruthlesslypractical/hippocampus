@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Ruthlessly Practical LLC. All rights reserved.
+// Use of this source code is governed by a BSD-3-Clause license
+// that can be found in the LICENSE file.
+
 // Command hippocampus-slack runs a Slack bot in Socket Mode that archives
 // channel messages to Redis and responds to /hippo slash commands.
 package main
@@ -19,6 +23,7 @@ import (
 	"github.com/slack-go/slack/socketmode"
 	"github.com/ruthlesslypractical/hippocampus/internal/config"
 	"github.com/ruthlesslypractical/hippocampus/internal/memory"
+	"github.com/ruthlesslypractical/hippocampus/internal/util"
 	"github.com/ruthlesslypractical/hippocampus/pkg/ingest"
 	"github.com/ruthlesslypractical/hippocampus/pkg/safeguard"
 )
@@ -63,11 +68,7 @@ func main() {
 	}
 
 	// Connect to Redis
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     cfg.Redis.Addr,
-		Password: cfg.Redis.Password,
-		DB:       cfg.Redis.DB,
-	})
+	rdb := cfg.Redis.NewRedisClient()
 	defer rdb.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -197,7 +198,7 @@ func handleEvent(ctx context.Context, store memory.Store, event slackevents.Even
 			}
 
 			if verbose {
-				log.Printf("[%s] %s: %s", ch.Name, ev.User, truncate(text, 80))
+				log.Printf("[%s] %s: %s", ch.Name, ev.User, util.Truncate(text, 80))
 			}
 
 			// Run safeguard scan
@@ -283,7 +284,7 @@ func handleSlashCommand(ctx context.Context, store memory.Store, cfg config.Conf
 		sb.WriteString(fmt.Sprintf("🔍 *Results for \"%s\"* (%d found):\n\n", arg, len(results)))
 		for i, r := range results {
 			ids[i] = r.Entry.ID
-			content := truncate(r.Entry.Content, 200)
+			content := util.Truncate(r.Entry.Content, 200)
 			sb.WriteString(fmt.Sprintf("`[%d]` %s\n   _Tags: %s_\n\n", i+1, content, strings.Join(r.Entry.Tags, ", ")))
 		}
 		lastResults[cmd.UserID] = ids
@@ -317,7 +318,7 @@ func handleSlashCommand(ctx context.Context, store memory.Store, cfg config.Conf
 		sb.WriteString(fmt.Sprintf("🕐 *Last %d entries:*\n\n", len(entries)))
 		for i, e := range entries {
 			ids[i] = e.ID
-			content := truncate(e.Content, 150)
+			content := util.Truncate(e.Content, 150)
 			ts := e.Timestamp.Format("Jan 2 15:04")
 			sb.WriteString(fmt.Sprintf("`[%d]` _%s_ — %s\n", i+1, ts, content))
 		}
@@ -380,7 +381,7 @@ func handleSlashCommand(ctx context.Context, store memory.Store, cfg config.Conf
 			responseText = fmt.Sprintf("❌ Store error: %s", err)
 			break
 		}
-		responseText = fmt.Sprintf("✅ Stored: \"%s\"", truncate(arg, 100))
+		responseText = fmt.Sprintf("✅ Stored: \"%s\"", util.Truncate(arg, 100))
 
 	case "forget":
 		if arg == "" {
@@ -412,7 +413,7 @@ func handleSlashCommand(ctx context.Context, store memory.Store, cfg config.Conf
 				responseText = fmt.Sprintf("❌ Entry not found: %s", err)
 				break
 			}
-			content := truncate(entry.Content, 300)
+			content := util.Truncate(entry.Content, 300)
 			responseText = fmt.Sprintf("⚠️ *About to delete:*\n\n`[%d]` %s\n_Tags: %s_\n\n→ Run `/hippo forget %d confirm` to delete permanently.", idx, content, strings.Join(entry.Tags, ", "), idx)
 		}
 
@@ -489,12 +490,7 @@ func handleSlashCommand(ctx context.Context, store memory.Store, cfg config.Conf
 	})
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…"
-}
+
 
 // runBackfill incrementally pages through channel history, storing messages
 // and tracking progress via a Redis cursor key. Resumes from where it left off.

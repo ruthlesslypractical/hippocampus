@@ -1,0 +1,14 @@
+[Unit]
+Description=Hippocampus Fractal Summarization
+After=network.target redis-server.service valkey-server.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/hippocampus-summarize --3h
+Environment=HIPPOCAMPUS_CONFIG=/etc/hippocampus/config.json
+Nice=15
+IOSchedulingClass=idle
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/hippocampus
+NoNewPrivileges=true

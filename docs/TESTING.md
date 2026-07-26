@@ -222,3 +222,135 @@ Manual testing checklist for the Hippocampus desktop app and CLI tools.
 - [ ] TLS forced when network sharing enabled
 - [ ] Redis password auto-generated on first local start
 - [ ] No credentials stored in git (check .gitignore)
+
+## Daemon (hippocampus-daemon)
+
+### Lifecycle
+- [ ] Daemon starts via LaunchAgent when app starts it
+- [ ] `launchctl list com.ruthlesslypractical.hippocampus.daemon` shows running
+- [ ] Log output at `~/Library/Logs/Hippocampus/daemon-stdout.log`
+- [ ] Binary self-update detection works (rebuild → daemon exits → launchd restarts)
+- [ ] Daemon actually exits on binary change (not just logs "exiting")
+- [ ] Clean shutdown on SIGTERM (drains in-flight GPU jobs)
+- [ ] Subsystem toggle: disable classifier in config → daemon skips classify jobs on next pick
+
+### Priority Dispatcher
+- [ ] Live ingest entries (from queue) processed before backlog
+- [ ] Verification jobs picked before backlog
+- [ ] Backlog entries processed oldest-first
+- [ ] Condenser runs at priority 4 (after verify, before consolidation)
+- [ ] Consolidation only runs when nothing else is queued
+- [ ] `gpu_concurrency` limits parallel Ollama calls (verify with activity monitor)
+
+### Condenser
+- [ ] New entries get `summary` field after daemon processes them
+- [ ] Short entries (user <300, assistant <1500, other <500 chars) skipped
+- [ ] Summary length capped at `max_output_chars` (default 250)
+- [ ] Data dumps produce metric-rich summaries (not just "training continues")
+- [ ] Config/code entries describe what they configure
+- [ ] Backfill: entries without `summary` field gradually get one
+
+### Consolidation & Links
+- [ ] Co-recall auto-links created at threshold (default 3 co-recalls)
+- [ ] Short entries (<200 chars) never get co-recall links
+- [ ] Re-evaluation: existing links re-scored periodically
+- [ ] Re-evaluation: short entries dissolved immediately ("short content" log)
+- [ ] Discovery: random pairing produces genuine cross-track links
+- [ ] Discovery: entries <200 chars excluded from discovery
+- [ ] Discovery: scores vary (not all 0.5) — graded scoring prompt working
+- [ ] Same-session dissolution protection: demotes before dissolving (check logs)
+- [ ] Link dissolution: links below min_score (0.4) get removed
+- [ ] Temporal neighbors: same-session + same-track entries get weak links
+- [ ] Ollama backoff: after 3 consecutive failures, exponential backoff kicks in
+
+### Classification
+- [ ] New entries classified into tracks
+- [ ] `track_auto:X` tag applied
+- [ ] `classified` and `classified:auto` tags applied
+- [ ] Windowed context: classifier sees surrounding entries for context
+- [ ] Short messages inherit track from neighbors
+
+## Admin CLI (hippocampus-admin)
+
+### Orientation
+- [ ] `orientation list` shows all meta:orientation:* entries with table
+- [ ] `orientation show <id>` prints full content
+- [ ] `orientation add meta:orientation:track:Test` opens $EDITOR with template
+- [ ] `orientation add meta:orientation:track:Test --file x.md` stores file content
+- [ ] `orientation add` rejects invalid ID format
+- [ ] `orientation add` rejects if entry already exists
+- [ ] `orientation edit <id>` opens current content in $EDITOR, saves on change
+- [ ] `orientation edit <id>` detects no-change and aborts
+- [ ] `orientation delete <id>` confirms before deleting
+- [ ] Auto-tags: meta, orientation, track:<Name> applied on add
+
+### Entry/Tag Operations
+- [ ] `entry show <id>` prints content, tags, timestamp, links
+- [ ] `entry list --track X` filters correctly
+- [ ] `entry edit <id>` opens JSON in editor, applies changes
+- [ ] `entry delete <id>` removes from hash + timeline + tag sets + links
+- [ ] `tag rename old new` updates all entries
+- [ ] `tag delete <tag>` removes from all entries + set key
+- [ ] `tag promote --track X` bulk promotes track_auto → track
+
+## Track Orientation & Shift Detection
+
+- [ ] On track shift, `[TRACK SHIFT: A → B]` appears in context
+- [ ] If orientation exists for new track: full content injected inline
+- [ ] If no orientation: helpful hint about `hippocampus-admin orientation add`
+- [ ] Track detection uses dominant track from recalled entries
+- [ ] Last track stored per-session in Redis (24h TTL)
+- [ ] First prompt of session: no shift detected (no previous track)
+
+## Tiered Recall
+
+- [ ] Tier 1 (position 0): full content injected verbatim
+- [ ] Tier 2 (positions 1-4): condensed summary used if available
+- [ ] Tier 2: falls back to truncation (300 chars) if no summary
+- [ ] Tier 2: includes `[full entry: <id>]` pointer
+- [ ] Tier 3 (positions 5+): 80-char snippet + entry ID ref
+- [ ] Orientation entries bypass tiering (always full)
+- [ ] Linked results use separate budget (don't compete with search)
+- [ ] Relevance floor: entries with negligible weight excluded
+
+## Working Set Tracker
+
+- [ ] Working set injected into every prompt after first
+- [ ] Content is ≤5 bullets, ≤500 chars
+- [ ] Updates after each assistant response (stop hook)
+- [ ] Previous session's working set inherited within 24h
+- [ ] Ollama timeout configured via working_set.timeout_s
+- [ ] Graceful degradation: if Ollama fails, stale working set preserved
+
+## OFC (Neuromodulator)
+
+- [ ] `[NEUROMODULATOR STATE]` block injected when enabled
+- [ ] DA moves on explicit positive/negative feedback
+- [ ] DA decays toward 0 each prompt
+- [ ] 5HT drifts toward baseline (0.5)
+- [ ] DA directive text changes based on level (positive/negative/neutral)
+- [ ] 5HT directive text changes based on level (good/normal/low)
+- [ ] OFC state persists across prompts within session
+- [ ] Regex fallback works when Ollama model unavailable
+
+## Packaging
+
+### macOS (.app bundle)
+- [ ] `make bundle` produces `dist/Hippocampus.app`
+- [ ] All 8 binaries present in Contents/Resources/
+- [ ] Redis + redisearch.so + dylibs present
+- [ ] Ollama present
+- [ ] Code signing passes (ad-hoc or real identity)
+- [ ] App launches on clean macOS install (no prior deps)
+
+### RPM
+- [ ] `./packaging/build-srpm.sh` produces .src.rpm
+- [ ] `rpmbuild` or mock builds binary RPM
+- [ ] Systemd units installed and functional
+
+### Debian
+- [ ] `./packaging/build-deb.sh 2.0.0` produces .deb
+- [ ] `dpkg -i` installs cleanly on Ubuntu 25.10
+- [ ] Systemd units (daemon + summarize timer) enabled and started
+- [ ] `apt-get install -f` resolves redis-server dependency
+- [ ] Config at /etc/hippocampus/config.json preserved on upgrade
