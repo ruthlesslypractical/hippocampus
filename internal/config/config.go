@@ -1,14 +1,24 @@
+// Copyright (c) 2026 Ruthlessly Practical LLC. All rights reserved.
+// Use of this source code is governed by a BSD-3-Clause license
+// that can be found in the LICENSE file.
+
 package config
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // Version is the single source of truth for the Hippocampus version.
-const Version = "1.0.0"
+// Overridden at build time via -ldflags "-X ...config.Version=X.Y.Z"
+var Version = "0.0.0-dev"
 
 // Config holds all configuration for Hippocampus.
 type Config struct {
@@ -20,7 +30,11 @@ type Config struct {
 	Hook          HookConfig          `json:"hook"`
 	MCP           MCPConfig           `json:"mcp"`
 	Slack         SlackConfig         `json:"slack"`
+	Log           LogConfig           `json:"log"`
 	WorkingSet    WorkingSetConfig    `json:"working_set"`
+	OFC           OFCConfig           `json:"ofc"`
+	Epistemic     EpistemicConfig     `json:"epistemic"`
+	Daemon        DaemonConfig        `json:"daemon"`
 	Author        string              `json:"author"` // Attribution tag for multi-user (e.g. "alice"). Empty = no attribution.
 }
 
@@ -44,6 +58,25 @@ type RedisConfig struct {
 	PoolSize     int `json:"pool_size,omitempty"`      // default 10
 }
 
+// NewRedisClient creates a Redis client from the config. Single source of truth for connection setup.
+func (c *RedisConfig) NewRedisClient() *redis.Client {
+	opts := &redis.Options{
+		Addr:        c.Addr,
+		Password:    c.Password,
+		Username:    c.Username,
+		DB:          c.DB,
+		MaxRetries:  c.MaxRetries,
+		DialTimeout: time.Duration(c.DialTimeoutS) * time.Second,
+		PoolSize:    c.PoolSize,
+	}
+	if c.TLS {
+		opts.TLSConfig = &tls.Config{
+			InsecureSkipVerify: c.TLSInsecure,
+		}
+	}
+	return redis.NewClient(opts)
+}
+
 // MemoryConfig holds memory system tuning.
 type MemoryConfig struct {
 	MaxSearchResults int `json:"max_search_results"` // MCP search default limit
@@ -61,6 +94,10 @@ type MemoryConfig struct {
 	// Confidence decay — older unreinforced memories fade during recall
 	DecayHalfLifeDays float64 `json:"decay_half_life_days"` // half-life in days (0 = no decay, default 30)
 
+	// Recall-time filtering
+	RelevanceFloor       float64 `json:"relevance_floor"`         // Min weight to inject recalled entry (default 0.05)
+	GlobalSummaryMaxChars int    `json:"global_summary_max_chars"` // Max chars for global track summary (default 4000)
+
 	// Summarizer settings
 	SummarizeMaxEntries    int `json:"summarize_max_entries"`      // max entries per track in --all mode (default 200)
 	SummarizeMaxInputChars int `json:"summarize_max_input_chars"`  // max chars fed to LLM for summarization (default 50000)
@@ -70,11 +107,13 @@ type MemoryConfig struct {
 
 // OllamaConfig holds local LLM settings for summarization and embedding.
 type OllamaConfig struct {
-	BaseURL             string `json:"base_url"`             // e.g. http://localhost:11434
-	Model               string `json:"model"`                // e.g. qwen3:32b (for summarization)
-	TimeoutMinutes      int    `json:"timeout_minutes"`      // HTTP timeout for generation (default 10)
-	EmbeddingModel      string `json:"embedding_model"`      // e.g. nomic-embed-text (for vector search)
-	EmbeddingDimensions int    `json:"embedding_dimensions"` // vector dimensions (default 768)
+	BaseURL             string `json:"base_url"`              // e.g. http://localhost:11434
+	Model               string `json:"model"`                 // e.g. qwen3:32b (for summarization)
+	TimeoutMinutes      int    `json:"timeout_minutes"`       // HTTP timeout for generation (default 10)
+	WedgeTimeoutSeconds int    `json:"wedge_timeout_seconds"` // Seconds without a token before declaring wedge (default 90)
+	MaxRetries          int    `json:"max_retries"`           // Retries per generation after wedge/failure (default 2)
+	EmbeddingModel      string `json:"embedding_model"`       // e.g. nomic-embed-text (for vector search)
+	EmbeddingDimensions int    `json:"embedding_dimensions"`  // vector dimensions (default 768)
 }
 
 // IngestConfig holds web ingestion pipeline settings.
@@ -114,14 +153,23 @@ type ConsolidationConfig struct {
 	Temperature       float64 `json:"temperature"`         // LLM temperature for scoring (default 0.1)
 	MaxTokens         int     `json:"max_tokens"`          // Max LLM response tokens (default 200)
 	EvalTimeoutS      int     `json:"eval_timeout_s"`      // Per-pair LLM eval timeout in seconds (default 60)
+	CooldownTTLS      int     `json:"cooldown_ttl_s"`      // Seconds before re-consolidating (default 3600)
+	DiscoveryMinLen   int     `json:"discovery_min_len"`   // Min content chars for random discovery (default 200)
 }
 
 // HookConfig holds recall/store hook settings.
 type HookConfig struct {
-	TimeoutS       int `json:"timeout_s"`        // Redis operation timeout (default 5)
-	BootPhaseTTLH  int `json:"boot_phase_ttl_h"` // Hours before re-injecting full orientation (default 24)
-	MaxLinkHops    int `json:"max_link_hops"`    // Associative link traversal depth (default 3)
-	HookTimeoutMs  int `json:"hook_timeout_ms"`  // Timeout written to generated agent config (default 3000)
+	TimeoutS          int     `json:"timeout_s"`              // Redis operation timeout (default 5)
+	BootPhaseTTLH     int     `json:"boot_phase_ttl_h"`       // Hours before re-injecting full orientation (default 24)
+	MaxLinkHops       int     `json:"max_link_hops"`          // Associative link traversal depth (default 3)
+	HookTimeoutMs     int     `json:"hook_timeout_ms"`        // Timeout written to generated agent config (default 3000)
+	LinkBudgetChars   int     `json:"link_budget_chars"`      // Max chars for linked recall results (default 3000)
+	LinkBudgetEntries int     `json:"link_budget_entries"`    // Max entries for linked recall (default 3)
+	MinLinkFollowScore float64 `json:"min_link_follow_score"` // Min |score| to follow links during recall (default 0.3)
+	Tier2MaxChars     int     `json:"tier2_max_chars"`        // Condensed content length for tier 2 (default 300)
+	Tier3SnippetChars int     `json:"tier3_snippet_chars"`    // Breadcrumb snippet length for tier 3 (default 80)
+	VibeMaxExchanges  int     `json:"vibe_max_exchanges"`     // Max vibe exchanges stored (default 6)
+	VibeTruncateChars int     `json:"vibe_truncate_chars"`    // Vibe text truncation per entry (default 200)
 }
 
 // MCPConfig holds MCP server settings.
@@ -147,13 +195,111 @@ type SlackChannel struct {
 	Backfill bool     `json:"backfill,omitempty"` // If true, incrementally ingest channel history
 }
 
+// LogConfig holds logging settings for all Hippocampus binaries.
+type LogConfig struct {
+	LogDir      string `json:"log_dir"`       // Directory for log files (default: ~/Library/Logs/Hippocampus on macOS, ~/.local/share/hippocampus/logs on Linux/FreeBSD)
+	Level       string `json:"level"`         // Minimum log level: debug, info, warn, error (default: "info")
+	DebugFile   bool   `json:"debug_file"`    // If true, write a separate <module>-debug.log at debug level (default: false)
+	AlsoStderr  bool   `json:"also_stderr"`   // If true, also write to stderr (default: true)
+}
+
 // WorkingSetConfig holds settings for the Working Set Tracker sidecar.
 type WorkingSetConfig struct {
 	Enabled       bool   `json:"enabled"`                  // Enable working set tracking
 	Model         string `json:"model"`                    // Ollama model for sidecar summarization (e.g. qwen3:1.7b)
 	MaxBullets    int    `json:"max_bullets"`              // Max bullet points in working set (default 5)
 	MaxChars      int    `json:"max_chars"`                // Max chars in working set (default 500)
+	TimeoutS      int    `json:"timeout_s"`                // Timeout for sidecar LLM call in seconds (default 120)
 	InheritTTLH   int    `json:"inherit_ttl_h"`            // Hours to inherit from previous session (default 24)
+}
+
+// OFCConfig holds settings for the Orbitofrontal Cortex (neuromodulator) module.
+type OFCConfig struct {
+	Enabled            bool    `json:"enabled"`               // Enable OFC module (also togglable via --ofc flag)
+	Model              string  `json:"model"`                 // Ollama model for sentiment analysis (e.g. qwen3:8b). Empty = regex-only fallback.
+	ClassifyTimeoutS   int     `json:"classify_timeout_s"`    // OFC model timeout in seconds (default 3)
+	DADecay            float64 `json:"da_decay"`              // DA decay rate per prompt (default 0.95, toward 0)
+	SHTDecay           float64 `json:"sht_decay"`             // 5HT decay rate per prompt (default 0.98, toward baseline)
+	SHTBaseline        float64 `json:"sht_baseline"`          // 5HT neutral baseline (default 0.5)
+	DAExplicitPositive float64 `json:"da_explicit_positive"`  // DA bump on explicit positive signal (default 0.08)
+	DAExplicitNegative float64 `json:"da_explicit_negative"`  // DA hit on explicit negative signal (default -0.12)
+	DAImplicitPositive float64 `json:"da_implicit_positive"`  // DA bump on implicit positive (default 0.03)
+	DAImplicitNegative float64 `json:"da_implicit_negative"`  // DA hit on implicit negative (default -0.05)
+	SHTPositive        float64 `json:"sht_positive"`          // 5HT bump on positive signal (default 0.03)
+	SHTNegative        float64 `json:"sht_negative"`          // 5HT hit on negative signal (default -0.04)
+}
+
+// EpistemicConfig holds settings for the fact-checking / epistemic analysis pipeline.
+type EpistemicConfig struct {
+	// Extraction
+	MaxTextLen      int     `json:"max_text_len"`       // Max chars of source text to send to extractor (default 3000)
+	MaxVocabTerms   int     `json:"max_vocab_terms"`    // Max vocabulary terms for reconciliation (default 50)
+	MinEntryLen     int     `json:"min_entry_len"`      // Skip entries shorter than this (default 50)
+	MaxKeywords     int     `json:"max_keywords"`       // Keyword cap for vocabulary lookup (default 30)
+	MinKeywordLen   int     `json:"min_keyword_len"`    // Min keyword length to consider (default 4)
+
+	// Verification
+	MinEncounters   int     `json:"min_encounters"`     // Encounter count threshold to trigger verification (default 3)
+	MaxVerifyBatch  int     `json:"max_verify_batch"`   // Max entries verified per run (default 20)
+	AutoPruneConf   float64 `json:"auto_prune_conf"`    // Contested confidence >= this → auto-prune (default 0.90)
+	ReinforceBoost  float64 `json:"reinforce_boost"`    // Confidence boost on recheck agreement (default 0.05)
+	SourceContextMax int    `json:"source_context_max"` // Max chars per source entry in verification (default 500)
+	MaxSourceEntries int    `json:"max_source_entries"` // Max source entries to gather for context (default 5)
+
+	// Recall-time injection (hook)
+	WarningConfMin  float64 `json:"warning_conf_min"`   // Only inject warnings with confidence >= this (default 0.70)
+	WarningMinKeys  int     `json:"warning_min_keys"`   // Require >= N keyword matches to inject warning (default 2)
+	MaxWarnings     int     `json:"max_warnings"`       // Max warnings injected per prompt (default 5)
+	EvidenceTrunc   int     `json:"evidence_trunc"`     // Truncate evidence text at N chars (default 80)
+
+	// Structural filters
+	VagueMaxLen     int     `json:"vague_max_len"`      // Terms <= this length (no underscore) are "vague" (default 6)
+}
+
+// OllamaOverride allows per-subsystem Ollama endpoint/model override.
+// Empty fields fall through to the parent scope.
+type OllamaOverride struct {
+	BaseURL string `json:"base_url,omitempty"`
+	Model   string `json:"model,omitempty"`
+}
+
+// DaemonConfig holds settings for the background processing daemon.
+type DaemonConfig struct {
+	Enabled           bool            `json:"enabled"`
+	GPUConcurrency    int             `json:"gpu_concurrency"`    // max simultaneous Ollama calls (default 2)
+	QueueKey          string          `json:"queue_key"`          // Redis list key (default "ingest:queue")
+	BacklogBatch      int             `json:"backlog_batch"`      // entries per backlog cycle (default 50)
+	BacklogPauseS     int             `json:"backlog_pause_s"`    // pause between backlog entries (default 5)
+	CorecallThreshold int             `json:"corecall_threshold"` // co-recall count to auto-link (default 3)
+	RecalledTTLH      int             `json:"recalled_ttl_h"`     // TTL for recalled:<id> sets in hours (default 24)
+	IdlePollS         int             `json:"idle_poll_s"`        // Seconds between polling when idle (default 2)
+	SelfUpdateCheckS  int             `json:"self_update_check_s"` // Binary mtime check interval (default 30)
+	FailureThreshold  int             `json:"failure_threshold"`  // Consecutive Ollama failures before backoff (default 3)
+	MaxBackoffS       int             `json:"max_backoff_s"`      // Maximum backoff cap in seconds (default 3600)
+	BackoffBaseS      int             `json:"backoff_base_s"`     // Base backoff duration in seconds (default 10)
+	Ollama            *OllamaOverride `json:"ollama,omitempty"`   // daemon-level override
+	Classifier        SubsystemConfig `json:"classifier"`
+	Extractor         SubsystemConfig `json:"extractor"`
+	Verifier          SubsystemConfig `json:"verifier"`
+	Linker            SubsystemConfig `json:"linker"`
+	Condenser         CondenserConfig `json:"condenser"`
+}
+
+// CondenserConfig controls per-message condensation (summary generation for individual entries).
+type CondenserConfig struct {
+	Enabled          bool            `json:"enabled"`              // enable/disable condensation
+	MinUserChars     int             `json:"min_user_chars"`       // user prompt threshold (default 300)
+	MinAssistantChars int            `json:"min_assistant_chars"`  // assistant response threshold (default 1500)
+	MinOtherChars    int             `json:"min_other_chars"`      // other entry types threshold (default 500)
+	MaxOutputChars   int             `json:"max_output_chars"`     // max condensed summary length (default 250)
+	MaxInputChars    int             `json:"max_input_chars"`      // Input truncation for LLM prompt (default 2000)
+	Ollama           *OllamaOverride `json:"ollama,omitempty"`
+}
+
+// SubsystemConfig allows per-subsystem Ollama routing and enablement control.
+type SubsystemConfig struct {
+	Enabled bool            `json:"enabled"`            // live-checked; daemon skips this subsystem if false
+	Ollama  *OllamaOverride `json:"ollama,omitempty"`
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -175,6 +321,8 @@ func DefaultConfig() Config {
 			StoreMinPromptLen:      20,
 			StoreMinResponseLen:    100,
 			DecayHalfLifeDays:      30,
+			RelevanceFloor:         0.05,
+			GlobalSummaryMaxChars:  4000,
 			SummarizeMaxEntries:    200,
 			SummarizeMaxInputChars: 50000,
 			ClassifyMaxChars:       500,
@@ -184,6 +332,8 @@ func DefaultConfig() Config {
 			BaseURL:             "http://localhost:11434",
 			Model:               "qwen3:32b",
 			TimeoutMinutes:      10,
+			WedgeTimeoutSeconds: 90,
+			MaxRetries:          2,
 			EmbeddingModel:      "nomic-embed-text",
 			EmbeddingDimensions: 768,
 		},
@@ -211,12 +361,21 @@ func DefaultConfig() Config {
 			Temperature:       0.1,
 			MaxTokens:         200,
 			EvalTimeoutS:      60,
+			CooldownTTLS:      3600,
+			DiscoveryMinLen:   200,
 		},
 		Hook: HookConfig{
-			TimeoutS:      5,
-			BootPhaseTTLH: 24,
-			MaxLinkHops:   3,
-			HookTimeoutMs: 3000,
+			TimeoutS:           10,
+			BootPhaseTTLH:      24,
+			MaxLinkHops:        3,
+			HookTimeoutMs:      10000,
+			LinkBudgetChars:    3000,
+			LinkBudgetEntries:  3,
+			MinLinkFollowScore: 0.3,
+			Tier2MaxChars:      300,
+			Tier3SnippetChars:  80,
+			VibeMaxExchanges:   6,
+			VibeTruncateChars:  200,
 		},
 		MCP: MCPConfig{
 			DefaultSearchLimit:    10,
@@ -228,9 +387,114 @@ func DefaultConfig() Config {
 			Model:       "qwen3:1.7b",
 			MaxBullets:  5,
 			MaxChars:    500,
+			TimeoutS:    120,
 			InheritTTLH: 24,
 		},
+		Log: LogConfig{
+			LogDir:     "", // empty = auto-detect based on OS at runtime
+			Level:      "info",
+			DebugFile:  false,
+			AlsoStderr: true,
+		},
+		OFC: OFCConfig{
+			Model:              "qwen3:8b",
+			ClassifyTimeoutS:   3,
+			DADecay:            0.95,
+			SHTDecay:           0.98,
+			SHTBaseline:        0.5,
+			DAExplicitPositive: 0.08,
+			DAExplicitNegative: -0.12,
+			DAImplicitPositive: 0.03,
+			DAImplicitNegative: -0.05,
+			SHTPositive:        0.03,
+			SHTNegative:        -0.04,
+		},
+		Epistemic: EpistemicConfig{
+			MaxTextLen:       3000,
+			MaxVocabTerms:    50,
+			MinEntryLen:      50,
+			MaxKeywords:      30,
+			MinKeywordLen:    4,
+			MinEncounters:    3,
+			MaxVerifyBatch:   20,
+			AutoPruneConf:    0.90,
+			ReinforceBoost:   0.05,
+			SourceContextMax: 500,
+			MaxSourceEntries: 5,
+			WarningConfMin:   0.70,
+			WarningMinKeys:   2,
+			MaxWarnings:      5,
+			EvidenceTrunc:    80,
+			VagueMaxLen:      6,
+		},
+		Daemon: DaemonConfig{
+			Enabled:           false,
+			GPUConcurrency:    2,
+			QueueKey:          "ingest:queue",
+			BacklogBatch:      50,
+			BacklogPauseS:     5,
+			CorecallThreshold: 3,
+			RecalledTTLH:      24,
+			IdlePollS:         2,
+			SelfUpdateCheckS:  30,
+			FailureThreshold:  3,
+			MaxBackoffS:       3600,
+			BackoffBaseS:      10,
+			Classifier:        SubsystemConfig{Enabled: true},
+			Extractor:         SubsystemConfig{Enabled: true},
+			Verifier:          SubsystemConfig{Enabled: true},
+			Linker:            SubsystemConfig{Enabled: true},
+			Condenser: CondenserConfig{
+				Enabled:           true,
+				MinUserChars:      300,
+				MinAssistantChars: 1500,
+				MinOtherChars:     500,
+				MaxOutputChars:    250,
+				MaxInputChars:     2000,
+			},
+		},
 	}
+}
+
+// ResolveOllama returns the effective Ollama base_url and model for a subsystem.
+// Resolution order: subsystem override → daemon override → global config.
+func (c *Config) ResolveOllama(subsystem *OllamaOverride) (baseURL, model string) {
+	baseURL = c.Ollama.BaseURL
+	model = c.Ollama.Model
+
+	// Daemon-level override
+	if c.Daemon.Ollama != nil {
+		if c.Daemon.Ollama.BaseURL != "" {
+			baseURL = c.Daemon.Ollama.BaseURL
+		}
+		if c.Daemon.Ollama.Model != "" {
+			model = c.Daemon.Ollama.Model
+		}
+	}
+
+	// Subsystem-level override
+	if subsystem != nil {
+		if subsystem.BaseURL != "" {
+			baseURL = subsystem.BaseURL
+		}
+		if subsystem.Model != "" {
+			model = subsystem.Model
+		}
+	}
+
+	return baseURL, model
+}
+
+// ResolveLogDir returns the effective log directory, auto-detecting based on OS if not configured.
+func (c *Config) ResolveLogDir() string {
+	if c.Log.LogDir != "" {
+		return c.Log.LogDir
+	}
+	homeDir, _ := os.UserHomeDir()
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(homeDir, "Library", "Logs", "Hippocampus")
+	}
+	return filepath.Join(homeDir, ".local", "share", "hippocampus", "logs")
 }
 
 // FindConfigPath returns the path to the Hippocampus config file by checking,

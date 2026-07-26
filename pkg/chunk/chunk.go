@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Ruthlessly Practical LLC. All rights reserved.
+// Use of this source code is governed by a BSD-3-Clause license
+// that can be found in the LICENSE file.
+
 // Package chunk splits long content into manageable pieces for storage.
 // Chunks are designed to be stored as linked entries, enabling
 // fine-grained semantic search while maintaining document coherence.

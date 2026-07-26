@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Ruthlessly Practical LLC. All rights reserved.
+// Use of this source code is governed by a BSD-3-Clause license
+// that can be found in the LICENSE file.
+
 package tests
 
 import (
@@ -277,7 +281,7 @@ func TestHookRecall_ExcludesFullContent(t *testing.T) {
 		{ID: "stub-1", Timestamp: time.Now(), Content: "[Web Page Cache] Article about MRAM", Tags: []string{"content:stub", "source:web", "mram"}},
 		{ID: "full-1", Timestamp: time.Now(), Content: "Full text of MRAM article with lots of detail...", Tags: []string{"content:full", "source:web", "mram"}},
 		{ID: "full-2", Timestamp: time.Now(), Content: "More full text content chunk 2...", Tags: []string{"content:full", "source:web", "mram"}},
-		{ID: "normal-1", Timestamp: time.Now(), Content: "A normal memory entry about MRAM analysis", Tags: []string{"mram", "track:Orbital-Compute"}},
+		{ID: "normal-1", Timestamp: time.Now(), Content: "A normal memory entry about MRAM analysis", Tags: []string{"mram", "track:ExampleProject"}},
 	}
 	for _, e := range entries {
 		require.NoError(t, tr.Store.Put(ctx, e))

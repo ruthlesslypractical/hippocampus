@@ -1,0 +1,16 @@
+hippocampus (2.0.0-1) oracular; urgency=medium
+
+  * Recall v2: tiered injection (full/summary/breadcrumb), track weighting, relevance floor
+  * Track orientation system with auto-injection on track shift
+  * hippocampus-admin CLI (entry, tag, orientation, summary management)
+  * Condenser: per-entry LLM summaries for compact Tier 2 recall
+  * Discovery linker: random-pair cross-track link evaluation
+  * Link quality: content length gate, graded scoring, same-session protection
+  * Working set tracker sidecar (qwen3:1.7b)
+  * OFC neuromodulator (DA/5HT sentiment feedback)
+  * Daemon self-update detection (binary mtime, clean restart)
+  * 16 magic numbers extracted to config tunables
+  * BSD-3-Clause license headers on all source files
+  * Full docs update (README, OVERVIEW, TUNABLES, TESTING)
+
+ -- Theron Bair <tbair@ruthlesslypractical.com>  Fri, 25 Jul 2026 18:50:00 -0800

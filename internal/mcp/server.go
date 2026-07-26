@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Ruthlessly Practical LLC. All rights reserved.
+// Use of this source code is governed by a BSD-3-Clause license
+// that can be found in the LICENSE file.
+
 package mcp
 
 import (
@@ -19,8 +23,9 @@ import (
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "hippocampus"
-	serverVersion   = config.Version
 )
+
+var serverVersion = config.Version
 
 // Server handles MCP JSON-RPC communication over stdio.
 type Server struct {
@@ -171,6 +176,8 @@ func (s *Server) dispatchTool(ctx context.Context, params CallToolParams) (CallT
 		return s.toolDelete(ctx, params.Arguments)
 	case "memory_time_range":
 		return s.toolTimeRange(ctx, params.Arguments)
+	case "memory_recent":
+		return s.toolRecent(ctx, params.Arguments)
 	case "memory_link":
 		return s.toolLink(ctx, params.Arguments)
 	case "memory_unlink":
@@ -185,6 +192,12 @@ func (s *Server) dispatchTool(ctx context.Context, params CallToolParams) (CallT
 		return s.toolStoreChunked(ctx, params.Arguments)
 	case "memory_get_section":
 		return s.toolGetSection(ctx, params.Arguments)
+	case "memory_classify":
+		return s.toolClassify(ctx, params.Arguments)
+	case "memory_classify_range":
+		return s.toolClassifyRange(ctx, params.Arguments)
+	case "memory_reclassify":
+		return s.toolReclassify(ctx, params.Arguments)
 	default:
 		return CallToolResult{}, fmt.Errorf("unknown tool: %s", params.Name)
 	}
@@ -412,6 +425,23 @@ func (s *Server) toolTimeRange(ctx context.Context, args map[string]interface{})
 	}
 
 	entries, err := s.store.EntriesByTimeRange(ctx, int64(start), int64(end), tags, limit)
+	if err != nil {
+		return CallToolResult{}, err
+	}
+
+	data, _ := json.MarshalIndent(entries, "", "  ")
+	return CallToolResult{
+		Content: []ContentBlock{{Type: "text", Text: string(data)}},
+	}, nil
+}
+
+func (s *Server) toolRecent(ctx context.Context, args map[string]interface{}) (CallToolResult, error) {
+	limit := 10
+	if l, ok := args["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+
+	entries, err := s.store.Recent(ctx, limit)
 	if err != nil {
 		return CallToolResult{}, err
 	}
