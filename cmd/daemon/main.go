@@ -23,6 +23,7 @@ import (
 	"github.com/ruthlesslypractical/hippocampus/internal/logging"
 	"github.com/ruthlesslypractical/hippocampus/internal/ollama"
 	"github.com/ruthlesslypractical/hippocampus/internal/util"
+	"github.com/ruthlesslypractical/hippocampus/pkg/modelresponse"
 )
 
 // ollamaClients holds pre-created Ollama clients for each subsystem.
@@ -565,6 +566,12 @@ func runConsolidation(ctx context.Context, rdb *redis.Client, cfg *config.Config
 	}
 	rdb.Expire(ctx, "consolidate:recent", time.Duration(cooldownTTLS)*time.Second)
 
+	// 0. Hebbian reinforcement: process one traversed:<promptID> key if any exist.
+	//    When the hook's graph traversal finds entries via link paths AND those entries
+	//    survive RRF into the final output, reinforce the links along those paths.
+	//    Also create shortcut links (A→C) for hop-2 discoveries.
+	reinforceTraversedPaths(ctx, rdb, cfg)
+
 	// 1. Bump temporal neighbors (free, no Ollama call)
 	linkTemporalNeighbors(ctx, rdb, cfg, entryID)
 
@@ -984,7 +991,7 @@ func classifyAndExtract(ctx context.Context, rdb *redis.Client, cfg *config.Conf
 		return nil, fmt.Errorf("ollama fused call: %w", err)
 	}
 
-	return parseFusedResponse(resp, explicitTrack)
+	return parseFusedResponse(resp, explicitTrack, cfg.Epistemic.ResponseTrunc)
 }
 
 func buildFusedPrompt(entryID, content string, window classifyWindow, manifestJSON string, vocab []string, classifyMaxChars, extractMaxChars int, explicitTrack string) string {
@@ -1074,7 +1081,10 @@ If no triples, use "triples": []. If no track fits, use "tracks": ["none"].
 	return b.String()
 }
 
-func parseFusedResponse(resp string, explicitTrack string) (*fusedResult, error) {
+func parseFusedResponse(resp string, explicitTrack string, responseTrunc int) (*fusedResult, error) {
+	if responseTrunc <= 0 {
+		responseTrunc = 300
+	}
 	resp = strings.TrimSpace(resp)
 
 	type fusedJSON struct {
@@ -1083,16 +1093,11 @@ func parseFusedResponse(resp string, explicitTrack string) (*fusedResult, error)
 		Triples    []Triple `json:"triples"`
 	}
 
-	// Find JSON object in response
-	start := strings.Index(resp, "{")
-	end := strings.LastIndex(resp, "}")
-	if start == -1 || end == -1 || end <= start {
-		return nil, fmt.Errorf("no JSON object in fused response: %.200s", resp)
-	}
-
-	var fr fusedJSON
-	if err := json.Unmarshal([]byte(resp[start:end+1]), &fr); err != nil {
-		return nil, fmt.Errorf("parsing fused JSON: %w (raw: %.500s)", err, resp[start:end+1])
+	// Use modelresponse.ParseJSON — handles preamble/postamble, no bracket-hunting
+	fr, err := modelresponse.ParseJSON[fusedJSON](resp)
+	if err != nil {
+		return nil, fmt.Errorf("no JSON object in fused response: %s",
+			modelresponse.Truncate(resp, responseTrunc))
 	}
 
 	result := &fusedResult{
@@ -1511,6 +1516,89 @@ func checkAndVerify(ctx context.Context, rdb *redis.Client, cfg *config.Config, 
 	// Instead, add to a priority verification queue so the next --verify run handles it first.
 	rdb.SAdd(ctx, "epistemic:verify:ready", hash)
 	slog.Info("triple ready for verification", "triple", hash, "encounters", count)
+}
+
+// reinforceTraversedPaths processes one `traversed:<promptID>` key per consolidation cycle.
+// When the hook's graph traversal surfaces entries that survive RRF into final output,
+// we reinforce those connections:
+// 1. Bump existing link scores along the path (+0.1, Hebbian: "fires together, wires together")
+// 2. Create shortcut links between seed entries and hop-2 survivors (score 0.5, type "shortcut")
+//
+// This is cheap (no LLM call) — just Redis reads/writes.
+func reinforceTraversedPaths(ctx context.Context, rdb *redis.Client, cfg *config.Config) {
+	// Find one traversed: key to process
+	keys, _, err := rdb.Scan(ctx, 0, "traversed:*", 1).Result()
+	if err != nil || len(keys) == 0 {
+		return
+	}
+	key := keys[0]
+
+	// Get the survivor IDs
+	survivors, err := rdb.SMembers(ctx, key).Result()
+	if err != nil || len(survivors) == 0 {
+		rdb.Del(ctx, key)
+		return
+	}
+
+	// Also get the co-recalled entries for this prompt (the seeds that started traversal)
+	promptID := strings.TrimPrefix(key, "traversed:")
+	recalledKey := "recalled:" + promptID
+	seeds, _ := rdb.SMembers(ctx, recalledKey).Result()
+
+	// For each survivor, check if it's already linked to any seed — if so, bump score
+	reinforceBoost := 0.1
+	for _, survivorID := range survivors {
+		survivorLinks, err := rdb.HGetAll(ctx, "links:"+survivorID).Result()
+		if err != nil {
+			continue
+		}
+
+		linkedToSeed := false
+		for _, seedID := range seeds {
+			if existing, ok := survivorLinks[seedID]; ok {
+				// Bump existing link score
+				linkedToSeed = true
+				score := 0.0
+				linkType := "corecall"
+				parts := strings.SplitN(existing, "|", 2)
+				if len(parts) >= 1 {
+					fmt.Sscanf(parts[0], "%f", &score)
+				}
+				if len(parts) >= 2 {
+					linkType = parts[1]
+				}
+
+				newScore := score + reinforceBoost
+				if newScore > 1.0 {
+					newScore = 1.0
+				}
+				newValue := fmt.Sprintf("%.4f|%s", newScore, linkType)
+				rdb.HSet(ctx, "links:"+survivorID, seedID, newValue)
+				rdb.HSet(ctx, "links:"+seedID, survivorID, newValue)
+				slog.Debug("reinforced link", "from", seedID, "to", survivorID, "new_score", newScore)
+			}
+		}
+
+		// If survivor wasn't directly linked to any seed, create a shortcut link
+		// (this means it was found via hop-2: seed→intermediate→survivor)
+		if !linkedToSeed && len(seeds) > 0 {
+			// Link to the first seed that's substantial enough
+			for _, seedID := range seeds {
+				if seedID == survivorID {
+					continue
+				}
+				// Create bidirectional shortcut link
+				rdb.HSet(ctx, "links:"+seedID, survivorID, "0.5|shortcut")
+				rdb.HSet(ctx, "links:"+survivorID, seedID, "0.5|shortcut")
+				slog.Info("shortcut link created", "seed", seedID, "survivor", survivorID)
+				break // One shortcut per survivor is enough
+			}
+		}
+	}
+
+	// Clean up the traversed key
+	rdb.Del(ctx, key)
+	slog.Debug("reinforced traversed paths", "prompt_id", promptID, "survivors", len(survivors))
 }
 
 func linkFromCoRecall(ctx context.Context, rdb *redis.Client, cfg *config.Config, entryID string) {

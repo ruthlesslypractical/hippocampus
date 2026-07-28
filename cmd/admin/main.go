@@ -1282,10 +1282,16 @@ func handleSummary(ctx context.Context, rdb *redis.Client, noun string, args []s
 	switch noun {
 	case "list":
 		summaryList(ctx, rdb, args)
+	case "show":
+		summaryShow(ctx, rdb, args)
+	case "edit":
+		summaryEdit(ctx, rdb, args)
+	case "delete":
+		summaryDelete(ctx, rdb, args)
 	case "wipe":
 		summaryWipe(ctx, rdb, args)
 	default:
-		fatalf("Unknown summary command: %s\n", noun)
+		fatalf("Unknown summary command: %s\nUsage: summary [list|show|edit|delete|wipe]\n", noun)
 	}
 }
 
@@ -1304,7 +1310,7 @@ func summaryList(ctx context.Context, rdb *redis.Client, args []string) {
 	for _, tag := range allTags {
 		if strings.HasPrefix(tag, "summary:") && tag != "summary:comprehensive" {
 			if trackFilter != "" {
-				// Filter: only summary:track:<trackFilter> or summary:session tags for entries with track
+				// Filter: only summary tags for the specified track
 				if strings.Contains(tag, trackFilter) {
 					summaryTags = append(summaryTags, tag)
 				}
@@ -1356,8 +1362,12 @@ func summaryList(ctx context.Context, rdb *redis.Client, args []string) {
 		// Extract track from tags
 		track := ""
 		for _, t := range entry.Tags {
-			if strings.HasPrefix(t, "summary:track:") {
-				track = strings.TrimPrefix(t, "summary:track:")
+			if strings.HasPrefix(t, "summary:daily:") {
+				track = strings.TrimPrefix(t, "summary:daily:")
+				break
+			}
+			if strings.HasPrefix(t, "summary:weekly:") {
+				track = strings.TrimPrefix(t, "summary:weekly:")
 				break
 			}
 			if strings.HasPrefix(t, "track:") {
@@ -1370,6 +1380,146 @@ func summaryList(ctx context.Context, rdb *redis.Client, args []string) {
 	}
 
 	fmt.Printf("\nTotal: %d summary entries\n", len(ids))
+}
+
+func summaryShow(ctx context.Context, rdb *redis.Client, args []string) {
+	if len(args) == 0 {
+		fatalf("Usage: summary show <id>\n")
+	}
+	id := args[0]
+
+	entry, err := fetchEntry(ctx, rdb, id)
+	if err != nil {
+		fatalf("Error: %v\n", err)
+	}
+
+	fmt.Printf("ID:        %s\n", entry.ID)
+	fmt.Printf("Tags:      %s\n", strings.Join(entry.Tags, ", "))
+	fmt.Printf("Timestamp: %s\n", time.Unix(entry.Timestamp, 0).Format(time.RFC3339))
+	fmt.Printf("Size:      %d chars\n", len(entry.Content))
+	fmt.Println(strings.Repeat("-", 60))
+	fmt.Println(entry.Content)
+}
+
+func summaryEdit(ctx context.Context, rdb *redis.Client, args []string) {
+	if len(args) == 0 {
+		fatalf("Usage: summary edit <id>\n")
+	}
+	id := args[0]
+
+	entry, err := fetchEntry(ctx, rdb, id)
+	if err != nil {
+		fatalf("Error: %v\n", err)
+	}
+
+	// Write current content to temp file
+	tmpFile, err := os.CreateTemp("", "hippocampus-summary-*.md")
+	if err != nil {
+		fatalf("Error creating temp file: %v\n", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmpFile.WriteString(entry.Content); err != nil {
+		fatalf("Error writing temp file: %v\n", err)
+	}
+	tmpFile.Close()
+
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+
+	cmd := exec.Command(editor, tmpPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fatalf("Editor exited with error: %v\n", err)
+	}
+
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		fatalf("Error reading edited file: %v\n", err)
+	}
+	content := strings.TrimSpace(string(data))
+
+	if content == strings.TrimSpace(entry.Content) {
+		fmt.Println("No changes detected.")
+		return
+	}
+
+	if content == "" {
+		fmt.Println("Empty content. Aborted.")
+		return
+	}
+
+	// Update entry content and timestamp
+	now := time.Now().Unix()
+	pipe := rdb.Pipeline()
+	pipe.HSet(ctx, entryPrefix+id, map[string]interface{}{
+		"content":   content,
+		"timestamp": now,
+	})
+	pipe.ZAdd(ctx, timelineKey, redis.Z{Score: float64(now), Member: id})
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		fatalf("Error updating summary: %v\n", err)
+	}
+
+	fmt.Printf("Updated %s (%d chars)\n", id, len(content))
+}
+
+func summaryDelete(ctx context.Context, rdb *redis.Client, args []string) {
+	if len(args) == 0 {
+		fatalf("Usage: summary delete <id>\n")
+	}
+	id := args[0]
+
+	entry, err := fetchEntry(ctx, rdb, id)
+	if err != nil {
+		fatalf("Error: %v\n", err)
+	}
+
+	// Show what we're about to delete
+	fmt.Printf("ID:   %s\n", entry.ID)
+	fmt.Printf("Tags: %s\n", strings.Join(entry.Tags, ", "))
+	fmt.Printf("Size: %d chars\n", len(entry.Content))
+	snippet := entry.Content
+	if len(snippet) > 120 {
+		snippet = snippet[:120] + "…"
+	}
+	fmt.Printf("Content: %s\n", snippet)
+
+	if !confirm("Delete this summary entry?") {
+		fmt.Println("Aborted.")
+		return
+	}
+
+	pipe := rdb.Pipeline()
+
+	// Remove from timeline
+	pipe.ZRem(ctx, timelineKey, id)
+
+	// Remove from all tag sets
+	for _, tag := range entry.Tags {
+		pipe.SRem(ctx, tagPrefix+tag, id)
+	}
+
+	// Delete the entry hash
+	pipe.Del(ctx, entryPrefix+id)
+
+	// Remove any links referencing this entry
+	pipe.Del(ctx, "links:"+id)
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		fatalf("Error deleting summary: %v\n", err)
+	}
+
+	fmt.Printf("Deleted %s\n", id)
 }
 
 func summaryWipe(ctx context.Context, rdb *redis.Client, args []string) {
@@ -1555,8 +1705,8 @@ func orientationList(ctx context.Context, rdb *redis.Client, args []string) {
 		return
 	}
 
-	fmt.Printf("%-45s %-15s %-20s %s\n", "ID", "TRACK", "UPDATED", "SIZE")
-	fmt.Println(strings.Repeat("-", 95))
+	fmt.Printf("%-50s %-15s %-20s %s\n", "REDIS KEY", "TRACK", "UPDATED", "SIZE")
+	fmt.Println(strings.Repeat("-", 100))
 
 	for _, id := range ids {
 		entry, err := fetchEntry(ctx, rdb, id)
@@ -1570,8 +1720,10 @@ func orientationList(ctx context.Context, rdb *redis.Client, args []string) {
 				break
 			}
 		}
+		// Display the full Redis key (entry:<id>) so there's no ambiguity
+		redisKey := entryPrefix + id
 		ts := time.Unix(entry.Timestamp, 0).Format("2006-01-02 15:04")
-		fmt.Printf("%-45s %-15s %-20s %d chars\n", truncate(id, 43), track, ts, len(entry.Content))
+		fmt.Printf("%-50s %-15s %-20s %d chars\n", truncate(redisKey, 48), track, ts, len(entry.Content))
 	}
 
 	fmt.Printf("\nTotal: %d orientation entries\n", len(ids))

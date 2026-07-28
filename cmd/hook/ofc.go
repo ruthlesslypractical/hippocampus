@@ -15,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/ruthlesslypractical/hippocampus/internal/config"
 	"github.com/ruthlesslypractical/hippocampus/internal/ollama"
+	"github.com/ruthlesslypractical/hippocampus/pkg/modelresponse"
 )
 
 // OFC — Orbitofrontal Cortex module
@@ -108,28 +109,41 @@ func ofcClassify(ctx context.Context, prompt string, ofc config.OFCConfig, ollam
 }
 
 // ofcModelClassify calls the configured Ollama model for sentiment analysis.
+// The key insight: we're not scoring the emotional tone of the user's message —
+// we're scoring whether they're ACCEPTING or REJECTING the previous assistant output.
+// Tool errors, build failures, and exploration are invisible to this classifier
+// because they only appear in assistant turns, not user turns.
 func ofcModelClassify(ctx context.Context, prompt, model, ollamaURL string) (ofcSignal, error) {
 	if ollamaURL == "" {
-		ollamaURL = "http://localhost:11434" // fallback; callers should pass cfg.Ollama.BaseURL
+		ollamaURL = "http://localhost:11434"
 	}
 	client := ollama.New(ollamaURL, model, 1)
 
-	classPrompt := fmt.Sprintf(`Classify the user's sentiment toward the AI assistant in this message.
+	classPrompt := fmt.Sprintf(`Classify whether this user message ACCEPTS, REJECTS, or REDIRECTS the previous assistant response.
 
 Reply with EXACTLY one line in this format:
-SENTIMENT: <polarity> <intensity> <type>
+SIGNAL: <verdict> <intensity> <type>
 
 Where:
-- polarity: positive, negative, or neutral
+- verdict: accept, reject, or redirect
 - intensity: mild or strong
-- type: explicit (user directly states satisfaction/dissatisfaction) or implicit (inferred from tone/behavior)
+- type: explicit (user directly states acceptance/rejection) or implicit (inferred from behavior)
+
+Definitions:
+- ACCEPT: user confirms the output was correct, moves forward with it, or expresses satisfaction
+- REJECT: user corrects the output, says it was wrong, asks to redo or undo it
+- REDIRECT: user asks a new question, changes topic, or elaborates without accepting/rejecting
 
 Examples:
-- "Thanks, that's perfect!" → SENTIMENT: positive strong explicit
-- "OK let's move on" → SENTIMENT: positive mild implicit
-- "No, that's wrong" → SENTIMENT: negative strong explicit
-- "Hmm, let me rethink this" → SENTIMENT: neutral mild implicit
-- "Nice! Let's try the next thing" → SENTIMENT: positive strong explicit
+- "Yeah." → SIGNAL: accept mild implicit
+- "Yeah, let's do it." → SIGNAL: accept strong explicit
+- "OK, next thing:" → SIGNAL: accept mild implicit
+- "No, that's wrong" → SIGNAL: reject strong explicit
+- "Hmm. Not quite." → SIGNAL: reject mild implicit
+- "What about X?" → SIGNAL: redirect mild implicit
+- "Wait, actually..." → SIGNAL: reject mild explicit
+- "Perfect." → SIGNAL: accept strong explicit
+- "Can you explain X?" → SIGNAL: redirect mild implicit
 
 Message: %s`, prompt)
 
@@ -144,92 +158,97 @@ Message: %s`, prompt)
 	return parseModelResponse(result)
 }
 
-// parseModelResponse extracts structured sentiment from model output.
+// parseModelResponse extracts structured signal from model output using
+// pkg/modelresponse.ParsePrefix. Handles both "SIGNAL:" (new) and
+// "SENTIMENT:" (legacy) prefixes.
 func parseModelResponse(response string) (ofcSignal, error) {
-	// Look for the SENTIMENT: line
-	lines := strings.Split(strings.TrimSpace(response), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(strings.ToUpper(line), "SENTIMENT:") {
-			continue
+	// Try new SIGNAL: format first, fall back to legacy SENTIMENT:
+	payload, err := modelresponse.ParsePrefix(response, "SIGNAL:")
+	if err != nil {
+		payload, err = modelresponse.ParsePrefix(response, "SENTIMENT:")
+		if err != nil {
+			return ofcSignal{}, fmt.Errorf("could not parse signal from model response: %s",
+				modelresponse.Truncate(response, 200))
 		}
-
-		parts := strings.Fields(strings.TrimSpace(line[len("SENTIMENT:"):]))
-		if len(parts) < 2 {
-			continue
-		}
-
-		var sig ofcSignal
-
-		// Parse polarity
-		switch strings.ToLower(parts[0]) {
-		case "positive":
-			sig.polarity = 1
-		case "negative":
-			sig.polarity = -1
-		default:
-			sig.polarity = 0
-		}
-
-		// Parse intensity
-		switch strings.ToLower(parts[1]) {
-		case "strong":
-			sig.intensity = 1.0
-		case "mild":
-			sig.intensity = 0.5
-		default:
-			sig.intensity = 0.7
-		}
-
-		// Parse type (optional third field)
-		if len(parts) >= 3 {
-			sig.implicit = strings.ToLower(parts[2]) == "implicit"
-		}
-
-		return sig, nil
 	}
 
-	return ofcSignal{}, fmt.Errorf("could not parse sentiment from model response: %q", response)
+	parts := strings.Fields(payload)
+	if len(parts) < 2 {
+		return ofcSignal{}, fmt.Errorf("too few fields in signal payload: %q", payload)
+	}
+
+	var sig ofcSignal
+
+	switch strings.ToLower(parts[0]) {
+	case "accept", "positive":
+		sig.polarity = 1
+	case "reject", "negative":
+		sig.polarity = -1
+	case "redirect", "neutral":
+		sig.polarity = 0
+	default:
+		sig.polarity = 0
+	}
+
+	switch strings.ToLower(parts[1]) {
+	case "strong":
+		sig.intensity = 1.0
+	case "mild":
+		sig.intensity = 0.5
+	default:
+		sig.intensity = 0.7
+	}
+
+	if len(parts) >= 3 {
+		sig.implicit = strings.ToLower(parts[2]) == "implicit"
+	}
+
+	return sig, nil
 }
 
-// --- Regex fallback (original implementation) ---
+// --- Regex fallback (used when model is unavailable) ---
 
-// Positive signal patterns (user confirms success)
-var positivePatterns = []string{
-	"yeah", "yes", "good", "nice", "correct", "perfect", "exactly",
-	"that worked", "ship it", "do it", "nailed it", "spot on", "spot-on",
-	"looks good", "love it", "great", "right", "yep", "bingo",
+// Accept signals: user is moving forward with the prior output
+var acceptPatterns = []string{
+	"yeah", "yes", "yep", "yup", "good", "nice", "correct", "perfect", "exactly",
+	"that worked", "ship it", "do it", "nailed it", "spot on", "looks good",
+	"love it", "great", "right", "bingo", "ok", "cool", "sweet", "let's do it",
 }
 
-// Negative signal patterns (user signals failure)
-var negativePatterns = []string{
+// Reject signals: user is correcting or pushing back on the prior output
+var rejectPatterns = []string{
 	"no", "wrong", "not that", "try again", "undo", "revert",
 	"that broke", "doesn't work", "that's not", "nope", "incorrect",
-	"that failed", "still broken", "same error", "didn't work",
+	"that failed", "still broken", "same error", "didn't work", "not quite",
+	"wait actually", "hmm no", "that's wrong",
 }
 
 // ofcRegexFallback uses pattern matching when the model is unavailable.
+// Maps accept→positive, reject→negative, everything else→neutral.
 func ofcRegexFallback(prompt string) ofcSignal {
 	promptLower := strings.ToLower(prompt)
 	words := strings.Fields(promptLower)
 
-	for _, pat := range negativePatterns {
+	for _, pat := range rejectPatterns {
 		if strings.Contains(promptLower, pat) {
 			return ofcSignal{polarity: -1, intensity: 1.0, implicit: false}
 		}
 	}
 
-	for _, pat := range positivePatterns {
+	for _, pat := range acceptPatterns {
 		if strings.Contains(promptLower, pat) {
 			return ofcSignal{polarity: 1, intensity: 1.0, implicit: false}
 		}
 	}
 
-	// Implicit positive: short prompt that's clearly moving on (not a correction)
-	if len(words) <= 5 && !strings.Contains(promptLower, "?") && !strings.Contains(promptLower, "why") {
-		return ofcSignal{polarity: 1, intensity: 0.5, implicit: true}
+	// Implicit accept: very short prompt with no question/correction markers
+	// "OK." / "Yah." / "Sure." — user is proceeding, not redirecting
+	if len(words) <= 3 && !strings.Contains(promptLower, "?") &&
+		!strings.Contains(promptLower, "why") && !strings.Contains(promptLower, "what") {
+		return ofcSignal{polarity: 1, intensity: 0.3, implicit: true}
 	}
 
+	// Everything else is a redirect (neutral) — new question, new topic, elaboration
 	return ofcSignal{polarity: 0, intensity: 0, implicit: true}
 }
 

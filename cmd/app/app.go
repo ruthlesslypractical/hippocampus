@@ -347,8 +347,11 @@ func (a *App) seedOrientationIfNeeded() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// Check if lean kernel already exists
-	exists, _ := a.redisClient.Exists(ctx, "entry:entry:meta:lean-kernel").Result()
+	// Check if lean kernel already exists (correct ID or legacy double-prefix)
+	exists, _ := a.redisClient.Exists(ctx, "entry:meta:lean-kernel").Result()
+	if exists == 0 {
+		exists, _ = a.redisClient.Exists(ctx, "entry:entry:meta:lean-kernel").Result()
+	}
 	if exists > 0 {
 		return // already seeded
 	}
@@ -362,12 +365,12 @@ Memory discipline: At breakpoints, pause and assess — page in what you need, s
 
 Reasoning breadcrumbs: At significant decision points, store a brief "chose X over Y because Z" entry tagged ` + "`kind:reasoning`" + `. Link it to what it explains. Don't breadcrumb trivial choices.
 
-Available tracks: [query memory_list_tags for tracks]. Query summary:track:<Name> for orientation on any track.`
+Available tracks: [query memory_list_tags for tracks]. Query meta:orientation:track:<Name> for orientation on any track.`
 
 	pipe := a.redisClient.Pipeline()
 
-	// Lean kernel entry
-	leanID := "entry:meta:lean-kernel"
+	// Lean kernel entry — correct ID format (no entry: prefix in the ID itself)
+	leanID := "meta:lean-kernel"
 	leanTags := "meta,orientation,lean-kernel"
 	pipe.HSet(ctx, "entry:"+leanID, map[string]interface{}{
 		"id": leanID, "content": leanContent, "tags": leanTags, "timestamp": now,
@@ -393,7 +396,7 @@ Your memory is stored in Valkey as tagged entries. You can read and write to it 
 
 **Tag taxonomy (how to find things):**
 - track:<Name> — Major project/topic tracks
-- summary:track:<Name> — Distilled summaries of a track (read FIRST for orientation)
+- summary:daily:<Name> — Distilled daily summaries of a track (read FIRST for orientation)
 - summary:comprehensive — High-level orientation entries
 - kind:user_prompt / kind:assistant_response — Captured conversation history
 - auto:captured — Entries auto-captured by hooks
@@ -402,7 +405,7 @@ Your memory is stored in Valkey as tagged entries. You can read and write to it 
 
 ### WHAT TO DO EACH SESSION
 
-1. When the user mentions a track/topic: Query summary:track:<Name> FIRST, then raw entries if needed.
+1. When the user mentions a track/topic: Query summary:daily:<Name> FIRST, then raw entries if needed.
 2. When something important is decided: Store it with appropriate tags.
 3. When significant insight emerges: Consider creating/updating a summary entry.
 4. Proactively tag: Use memory_store for curated insights, not just raw conversation.

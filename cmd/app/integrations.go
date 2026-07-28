@@ -188,6 +188,7 @@ func (a *App) installKiroAgent() {
 			"memory_list_tags", "memory_rename_tag", "memory_time_range",
 			"memory_link", "memory_unlink", "memory_links",
 			"memory_ingest_url", "memory_store_chunked", "memory_get_section",
+			"memory_summary_tree", "memory_summary_leaves",
 		},
 		"systemPrompt": fmt.Sprintf("You have persistent memory via MCP tools (memory_*). Use them proactively. Config: %s", configPath),
 	}

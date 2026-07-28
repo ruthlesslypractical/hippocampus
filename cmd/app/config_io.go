@@ -267,16 +267,45 @@ func (a *App) GetTunables() Tunables {
 }
 
 // SaveTunables saves updated tunable values and persists to disk.
-// Merges carefully to avoid clobbering Ollama overrides and subsystem configs
-// that the tunables UI doesn't manage.
+// Merges carefully to avoid clobbering fields that the tunables UI doesn't render.
+// Pattern: replace entire struct only when the UI renders ALL fields;
+// otherwise merge field-by-field to preserve unrendered fields.
 func (a *App) SaveTunables(t Tunables) error {
 	a.fullConfig.Ingest = t.Ingest
 	a.fullConfig.Consolidation = t.Consolidation
-	a.fullConfig.Hook = t.Hook
 	a.fullConfig.MCP = t.MCP
 	a.fullConfig.Memory = t.Memory
 	a.fullConfig.Epistemic = t.Epistemic
-	a.fullConfig.Log = t.Log
+
+	// Hook: merge only the scalar fields the UI renders.
+	// Preserve LinkFollow, RRFConstant, Tier1Ratio, Tier2Ratio, and other
+	// fields added after the settings schema was defined.
+	a.fullConfig.Hook.TimeoutS = t.Hook.TimeoutS
+	a.fullConfig.Hook.BootPhaseTTLH = t.Hook.BootPhaseTTLH
+	a.fullConfig.Hook.HookTimeoutMs = t.Hook.HookTimeoutMs
+	a.fullConfig.Hook.Tier2MaxChars = t.Hook.Tier2MaxChars
+	a.fullConfig.Hook.Tier3SnippetChars = t.Hook.Tier3SnippetChars
+	a.fullConfig.Hook.VibeMaxExchanges = t.Hook.VibeMaxExchanges
+	a.fullConfig.Hook.VibeTruncateChars = t.Hook.VibeTruncateChars
+	// Tier ratios: only update if rendered (non-zero from UI means the select/slider was present)
+	if t.Hook.Tier1Ratio > 0 {
+		a.fullConfig.Hook.Tier1Ratio = t.Hook.Tier1Ratio
+	}
+	if t.Hook.Tier2Ratio > 0 {
+		a.fullConfig.Hook.Tier2Ratio = t.Hook.Tier2Ratio
+	}
+	if t.Hook.RRFConstant > 0 {
+		a.fullConfig.Hook.RRFConstant = t.Hook.RRFConstant
+	}
+	// NOT touching: LinkFollow (managed via config.json directly for now),
+	// MaxLinkHops/LinkBudget* (deprecated fields), MinLinkFollowScore (deprecated).
+
+	// Log: merge only the fields the UI renders (level as select, two bools).
+	if t.Log.Level != "" {
+		a.fullConfig.Log.Level = t.Log.Level
+	}
+	a.fullConfig.Log.DebugFile = t.Log.DebugFile
+	a.fullConfig.Log.AlsoStderr = t.Log.AlsoStderr
 
 	// Daemon: merge only the scalar fields the UI manages.
 	// Preserve Ollama overrides and subsystem Enabled states (managed separately).
