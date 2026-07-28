@@ -161,15 +161,33 @@ type ConsolidationConfig struct {
 type HookConfig struct {
 	TimeoutS          int     `json:"timeout_s"`              // Redis operation timeout (default 5)
 	BootPhaseTTLH     int     `json:"boot_phase_ttl_h"`       // Hours before re-injecting full orientation (default 24)
-	MaxLinkHops       int     `json:"max_link_hops"`          // Associative link traversal depth (default 3)
+	MaxLinkHops       int     `json:"max_link_hops"`          // DEPRECATED: use LinkFollow.MaxHops
 	HookTimeoutMs     int     `json:"hook_timeout_ms"`        // Timeout written to generated agent config (default 3000)
-	LinkBudgetChars   int     `json:"link_budget_chars"`      // Max chars for linked recall results (default 3000)
-	LinkBudgetEntries int     `json:"link_budget_entries"`    // Max entries for linked recall (default 3)
-	MinLinkFollowScore float64 `json:"min_link_follow_score"` // Min |score| to follow links during recall (default 0.3)
+	LinkBudgetChars   int     `json:"link_budget_chars"`      // DEPRECATED: use LinkFollow + RRF fusion
+	LinkBudgetEntries int     `json:"link_budget_entries"`    // DEPRECATED: use LinkFollow.TopK
+	MinLinkFollowScore float64 `json:"min_link_follow_score"` // DEPRECATED: use LinkFollow.MinScore
 	Tier2MaxChars     int     `json:"tier2_max_chars"`        // Condensed content length for tier 2 (default 300)
 	Tier3SnippetChars int     `json:"tier3_snippet_chars"`    // Breadcrumb snippet length for tier 3 (default 80)
+	Tier1Ratio        float64 `json:"tier1_ratio"`            // Fraction of results injected as full text (default 0.2, ceil'd, min 1)
+	Tier2Ratio        float64 `json:"tier2_ratio"`            // Fraction of results injected as summary/condensed (default 0.3, ceil'd)
+	// Tier 3 = remainder (1.0 - tier1_ratio - tier2_ratio)
 	VibeMaxExchanges  int     `json:"vibe_max_exchanges"`     // Max vibe exchanges stored (default 6)
 	VibeTruncateChars int     `json:"vibe_truncate_chars"`    // Vibe text truncation per entry (default 200)
+	LinkFollow        LinkFollowConfig `json:"link_follow"`   // Graph traversal channel settings
+	RRFConstant       int     `json:"rrf_constant"`           // RRF k constant: score = 1/(k + rank). Higher = more equal weighting (default 60)
+}
+
+// LinkFollowConfig controls graph traversal as a retrieval channel in the recall hook.
+// Links are traversed by |score| (absolute value) for ranking purposes, but the
+// original sign is preserved through to the output — negative-scored links surface
+// as anti-memories (prior dead ends, rejected approaches, superseded decisions).
+type LinkFollowConfig struct {
+	Enabled       bool    `json:"enabled"`        // Enable graph traversal channel (default true)
+	MaxHops       int     `json:"max_hops"`       // Max traversal depth (default 2)
+	DecayFactor   float64 `json:"decay_factor"`   // Score multiplier per hop — exponential death for weak paths (default 0.5)
+	MinScore      float64 `json:"min_score"`      // Min |score| post-decay to keep candidate (default 0.4)
+	MaxCandidates int     `json:"max_candidates"` // Max candidates to collect before ranking (default 100)
+	TopK          int     `json:"top_k"`          // Survivors emitted into RRF fusion (default 10)
 }
 
 // MCPConfig holds MCP server settings.
@@ -250,7 +268,8 @@ type EpistemicConfig struct {
 	WarningConfMin  float64 `json:"warning_conf_min"`   // Only inject warnings with confidence >= this (default 0.70)
 	WarningMinKeys  int     `json:"warning_min_keys"`   // Require >= N keyword matches to inject warning (default 2)
 	MaxWarnings     int     `json:"max_warnings"`       // Max warnings injected per prompt (default 5)
-	EvidenceTrunc   int     `json:"evidence_trunc"`     // Truncate evidence text at N chars (default 80)
+	EvidenceTrunc   int     `json:"evidence_trunc"`      // Truncate evidence text at N chars (default 80)
+	ResponseTrunc   int     `json:"response_trunc"`      // Truncate raw LLM response in error messages (default 300)
 
 	// Structural filters
 	VagueMaxLen     int     `json:"vague_max_len"`      // Terms <= this length (no underscore) are "vague" (default 6)
@@ -367,15 +386,26 @@ func DefaultConfig() Config {
 		Hook: HookConfig{
 			TimeoutS:           10,
 			BootPhaseTTLH:      24,
-			MaxLinkHops:        3,
+			MaxLinkHops:        3, // deprecated, kept for back-compat
 			HookTimeoutMs:      10000,
-			LinkBudgetChars:    3000,
-			LinkBudgetEntries:  3,
-			MinLinkFollowScore: 0.3,
+			LinkBudgetChars:    3000,  // deprecated
+			LinkBudgetEntries:  3,     // deprecated
+			MinLinkFollowScore: 0.3,   // deprecated
 			Tier2MaxChars:      300,
 			Tier3SnippetChars:  80,
+			Tier1Ratio:         0.2,
+			Tier2Ratio:         0.3,
 			VibeMaxExchanges:   6,
 			VibeTruncateChars:  200,
+			RRFConstant:        60,
+			LinkFollow: LinkFollowConfig{
+				Enabled:       true,
+				MaxHops:       2,
+				DecayFactor:   0.5,
+				MinScore:      0.4,
+				MaxCandidates: 100,
+				TopK:          10,
+			},
 		},
 		MCP: MCPConfig{
 			DefaultSearchLimit:    10,
@@ -425,6 +455,7 @@ func DefaultConfig() Config {
 			WarningMinKeys:   2,
 			MaxWarnings:      5,
 			EvidenceTrunc:    80,
+			ResponseTrunc:    300,
 			VagueMaxLen:      6,
 		},
 		Daemon: DaemonConfig{

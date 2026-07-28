@@ -45,7 +45,7 @@ type Link struct {
 // Curated stores get 1.0, summaries 0.9, auto-captured responses 0.5, prompts 0.3.
 func DefaultWeightForTags(tags []string) float64 {
 	for _, t := range tags {
-		if t == "summary:comprehensive" || strings.HasPrefix(t, "summary:track:") {
+		if t == "summary:comprehensive" || strings.HasPrefix(t, "summary:daily:") || strings.HasPrefix(t, "summary:weekly:") {
 			return 0.9
 		}
 		if strings.HasPrefix(t, "summary:") {

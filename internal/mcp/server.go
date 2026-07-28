@@ -198,6 +198,10 @@ func (s *Server) dispatchTool(ctx context.Context, params CallToolParams) (CallT
 		return s.toolClassifyRange(ctx, params.Arguments)
 	case "memory_reclassify":
 		return s.toolReclassify(ctx, params.Arguments)
+	case "memory_summary_tree":
+		return s.toolSummaryTree(ctx, params.Arguments)
+	case "memory_summary_leaves":
+		return s.toolSummaryLeaves(ctx, params.Arguments)
 	default:
 		return CallToolResult{}, fmt.Errorf("unknown tool: %s", params.Name)
 	}

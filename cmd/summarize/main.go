@@ -332,7 +332,7 @@ func findLastSummaryTime(ctx context.Context, client *redis.Client, tracks []str
 			prefixes = append(prefixes, "summary:3h:"+t)
 		}
 		if doDaily {
-			prefixes = append(prefixes, "summary:track:"+t)
+			prefixes = append(prefixes, "summary:daily:"+t)
 		}
 		if doWeekly {
 			prefixes = append(prefixes, "summary:weekly:"+t)
@@ -505,6 +505,17 @@ func run3hBlocks(ctx context.Context, client *redis.Client, ollamaClient *ollama
 				Tags:      tags,
 				Timestamp: windowEnd,
 			})
+
+			// Record source entry IDs for dependency tracking (not formal links —
+			// these are for summary analysis: "what entries produced this summary?")
+			if len(entries) > 0 {
+				sourceIDs := make([]string, 0, len(entries))
+				for _, e := range entries {
+					sourceIDs = append(sourceIDs, e.ID)
+				}
+				client.HSet(ctx, entryPrefix+entryID, "sources", strings.Join(sourceIDs, ","))
+			}
+
 			generated++
 		}
 	}
@@ -530,7 +541,7 @@ func runDailyRollups(ctx context.Context, client *redis.Client, ollamaClient *ol
 			}
 
 			dateStr := day.Format("2006-01-02")
-			entryID := fmt.Sprintf("summary:track:%s:%s", t, dateStr)
+			entryID := fmt.Sprintf("summary:daily:%s:%s", t, dateStr)
 
 			exists, _ := client.Exists(ctx, entryPrefix+entryID).Result()
 			if exists > 0 {
@@ -559,7 +570,7 @@ func runDailyRollups(ctx context.Context, client *redis.Client, ollamaClient *ol
 				tags := []string{
 					"track:" + t,
 					strings.ToLower(t),
-					"summary:track:" + t,
+					"summary:daily:" + t,
 					"summary:daily",
 					"date:" + dateStr,
 				}
@@ -569,6 +580,7 @@ func runDailyRollups(ctx context.Context, client *redis.Client, ollamaClient *ol
 					Tags:      tags,
 					Timestamp: dayEnd,
 				})
+				client.HSet(ctx, entryPrefix+entryID, "sources", entries[0].ID)
 				generated++
 				continue
 			}
@@ -583,7 +595,7 @@ func runDailyRollups(ctx context.Context, client *redis.Client, ollamaClient *ol
 			tags := []string{
 				"track:" + t,
 				strings.ToLower(t),
-				"summary:track:" + t,
+				"summary:daily:" + t,
 				"summary:daily",
 				"date:" + dateStr,
 			}
@@ -593,6 +605,14 @@ func runDailyRollups(ctx context.Context, client *redis.Client, ollamaClient *ol
 				Tags:      tags,
 				Timestamp: dayEnd,
 			})
+
+			// Record source entry IDs for dependency tracking
+			sourceIDs := make([]string, 0, len(entries))
+			for _, e := range entries {
+				sourceIDs = append(sourceIDs, e.ID)
+			}
+			client.HSet(ctx, entryPrefix+entryID, "sources", strings.Join(sourceIDs, ","))
+
 			generated++
 		}
 	}
@@ -679,12 +699,22 @@ func runWeeklyRollups(ctx context.Context, client *redis.Client, ollamaClient *o
 			slog.Info("weekly: generating", "entry_id", entryID, "sources", len(entries))
 
 			var prompt strings.Builder
-			prompt.WriteString(fmt.Sprintf(`Produce a weekly summary for the "%s" track from these daily summaries.
+			prompt.WriteString(fmt.Sprintf(`You are writing memory notes for an AI assistant that will use these to quickly orient on the "%s" project after context loss. Be extremely concise.
 
-Capture the arc: what started, progressed, was decided, remains open.
-Note shifts in direction. Identify patterns. Keep under 1500 words. Use markdown.
+Format: 3-7 bullet points maximum. Each bullet is ONE of:
+- A DECISION made (what was chosen and why)
+- A STATE change (what moved from X to Y)  
+- A BLOCKER (what's stuck and on what)
+- A KEY FACT (a number, name, or detail that would be hard to re-derive)
 
-Daily summaries:
+Rules:
+- Maximum 200 words total
+- No headers, no tables, no "Action Items" sections
+- No filler phrases ("This week focused on...", "Key progress includes...")
+- Write as if every word costs $1
+- If nothing meaningful happened, say "No significant changes" and stop
+
+Daily summaries to compress:
 `, t))
 			sort.Slice(entries, func(i, j int) bool { return entries[i].Timestamp < entries[j].Timestamp })
 			for _, ds := range entries {
@@ -717,7 +747,7 @@ Daily summaries:
 }
 
 func getDailySummariesForWeek(ctx context.Context, client *redis.Client, track string, weekStart, weekEnd time.Time) []entry {
-	summaryTag := "summary:track:" + track
+	summaryTag := "summary:daily:" + track
 	ids, err := client.SMembers(ctx, tagPrefix+summaryTag).Result()
 	if err != nil || len(ids) == 0 {
 		return nil
@@ -775,17 +805,17 @@ func runGlobal(ctx context.Context, client *redis.Client, ollamaClient *ollama.C
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Timestamp < entries[j].Timestamp })
 
 		var prompt strings.Builder
-		prompt.WriteString(fmt.Sprintf(`Produce a comprehensive global summary for the "%s" track from these weekly summaries.
+		prompt.WriteString(fmt.Sprintf(`You are writing a single-page orientation document for the "%s" track. An AI assistant will read this to understand the project's current state after total context loss.
 
-This should be a high-level overview capturing:
-- The overall trajectory and current state
-- Key decisions and their outcomes
-- Major milestones
-- Current open questions and next steps
+Format:
+- One paragraph: what this project IS (2-3 sentences max)
+- Then bullet points: current state, key decisions still in effect, active blockers
+- Maximum %d characters total
+- No history unless it directly impacts current state
+- No "Next Steps" unless something is actively blocked
+- Write as memory, not as a report
 
-IMPORTANT: Keep the output under %d characters. Be concise but comprehensive. Use markdown.
-
-Weekly summaries:
+Weekly summaries to compress:
 `, t, maxGlobalChars))
 
 		for _, ws := range entries {
@@ -890,8 +920,15 @@ func discoverTracks(ctx context.Context, client *redis.Client, filter string) []
 		if name == "" {
 			continue
 		}
-		// Only accept if it's in the manifest OR starts with uppercase (real track, not stray topic tag)
-		if manifestTracks[name] || (len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z') {
+		// Simon Says: only accept tracks that are in the manifest (authoritative list).
+		// If no manifest exists, fall back to uppercase heuristic.
+		if len(manifestTracks) > 0 {
+			if manifestTracks[name] {
+				trackSet[name] = true
+			} else {
+				slog.Debug("rejected phantom track (not in manifest)", "name", name, "tag", tag)
+			}
+		} else if len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
 			trackSet[name] = true
 		} else {
 			// Stray lowercase tag that's not a real track — remove from tags:all
@@ -1178,17 +1215,16 @@ func generateSummary(ctx context.Context, ollamaClient *ollama.Client, track str
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Timestamp < entries[j].Timestamp })
 
 	var prompt strings.Builder
-	prompt.WriteString(fmt.Sprintf(`You are a technical summarizer. Produce a concise, structured summary of the following entries about the "%s" track.
+	prompt.WriteString(fmt.Sprintf(`You are writing memory notes for an AI assistant about the "%s" track. These notes will be used for rapid orientation after context loss.
 
 Requirements:
-- Use markdown headers and bullet points
-- Capture key decisions, insights, and open questions
-- Note any action items or next steps
-- Preserve technical detail that is EXPLICITLY present in the entries
-- If entries span multiple subtopics, organize by subtopic
-- Keep under 2000 words
-- DO NOT invent, fabricate, or fill in details not present in the source entries. If a config format, command, or value is not explicitly shown, do not guess at it. Summarize what IS there, not what you think SHOULD be there.
-- Prefer quoting actual commands/configs from the entries over reconstructing them from memory
+- Bullet points only, no headers except a single title line
+- Capture: decisions made, state changes, blockers, key facts/numbers
+- Preserve technical detail (commands, configs, values) that is EXPLICITLY present
+- DO NOT invent details not present in the source entries
+- DO NOT add "Action Items", "Next Steps", or "Open Questions" sections unless a specific blocker is identified
+- Keep under 800 words
+- Write as if every word costs $1 — no filler, no ceremony
 
 Entries:
 `, track))
@@ -1212,12 +1248,12 @@ Entries:
 
 func storeSummary(ctx context.Context, store *memory.RedisStore, track, summary string) {
 	today := time.Now().Format("2006-01-02")
-	entryID := fmt.Sprintf("summary:track:%s:%s", track, today)
+	entryID := fmt.Sprintf("summary:daily:%s:%s", track, today)
 
 	tags := []string{
 		"track:" + track,
 		strings.ToLower(track),
-		"summary:track:" + track,
+		"summary:daily:" + track,
 		"summary:daily",
 		"date:" + today,
 	}
@@ -1543,7 +1579,7 @@ func runBackfill(ctx context.Context, client *redis.Client, store *memory.RedisS
 
 		for _, t := range tracks {
 			dateStr := day.Format("2006-01-02")
-			entryID := fmt.Sprintf("summary:track:%s:%s", t, dateStr)
+			entryID := fmt.Sprintf("summary:daily:%s:%s", t, dateStr)
 
 			exists, _ := client.Exists(ctx, entryPrefix+entryID).Result()
 			if exists > 0 {
@@ -1571,7 +1607,7 @@ func runBackfill(ctx context.Context, client *redis.Client, store *memory.RedisS
 			tags := []string{
 				"track:" + t,
 				strings.ToLower(t),
-				"summary:track:" + t,
+				"summary:daily:" + t,
 				"summary:daily",
 				"date:" + dateStr,
 			}
@@ -1656,7 +1692,7 @@ func runWeeklyRollup(ctx context.Context, client *redis.Client, store *memory.Re
 	for _, t := range tracks {
 		slog.Info("weekly rollup", "track", t)
 
-		summaryTag := "summary:track:" + t
+		summaryTag := "summary:daily:" + t
 		ids, err := client.SMembers(ctx, tagPrefix+summaryTag).Result()
 		if err != nil || len(ids) == 0 {
 			slog.Info("no daily summaries for track", "track", t)
@@ -1693,8 +1729,12 @@ func runWeeklyRollup(ctx context.Context, client *redis.Client, store *memory.Re
 		var prompt strings.Builder
 		prompt.WriteString(fmt.Sprintf(`Produce a weekly summary for the "%s" track from these daily summaries.
 
-Capture the arc: what started, progressed, was decided, remains open.
-Note shifts in direction. Identify patterns. Keep under 1500 words. Use markdown.
+Format:
+- Typed bullets ONLY. Each bullet starts with one of: DECISION, STATE, BLOCKER, KEY FACT, OPEN
+- No markdown headers, no tables, no horizontal rules, no code blocks
+- Capture the arc: what started, progressed, was decided, remains open
+- Note shifts in direction. Identify patterns.
+- Keep under 200 words. Every word costs $1.
 
 Daily summaries:
 `, t))
@@ -1746,7 +1786,7 @@ func runCrossTrackReview(ctx context.Context, client *redis.Client, store *memor
 
 	var summaries []trackSummary
 	for _, t := range tracks {
-		summaryTag := "summary:track:" + t
+		summaryTag := "summary:daily:" + t
 		ids, err := client.SMembers(ctx, tagPrefix+summaryTag).Result()
 		if err != nil || len(ids) == 0 {
 			continue

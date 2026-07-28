@@ -411,6 +411,38 @@ func toolDefinitions() []Tool {
 				},
 			}),
 		},
+		{
+			Name:        "memory_summary_tree",
+			Description: "Walk the summary provenance tree. Given a summary ID (weekly/daily/3h), returns the full hierarchy of child summaries and leaf entries that produced it. Use for auditing what went into a summary, tracing misclassifications back to source entries, or understanding summary lineage.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Summary entry ID (e.g., 'summary:daily:VBrain:2026-06-14', 'summary:weekly:Markets:2026-07-13').",
+					},
+					"max_depth": map[string]interface{}{
+						"type":        "number",
+						"description": "Maximum recursion depth (default: 10). Use 1 to get only immediate children.",
+					},
+				},
+				"required": []string{"id"},
+			}),
+		},
+		{
+			Name:        "memory_summary_leaves",
+			Description: "Get all leaf (non-summary) entry IDs that fed into a summary. Walks the full tree and returns only the deepest entries — the raw prompts/responses/stored artifacts. Use this to iterate over source entries for bulk retag/reclassification operations.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Summary entry ID to trace leaves for.",
+					},
+				},
+				"required": []string{"id"},
+			}),
+		},
 	}
 }
 

@@ -1,0 +1,534 @@
+PROVISIONAL PATENT APPLICATION
+
+Title: SYSTEMS AND METHODS FOR BIOLOGICALLY-CONSTRAINED
+       NEURAL COMPUTATION AND SELF-REINFORCING EPISODIC
+       MEMORY RETRIEVAL
+
+Inventor: [INVENTOR NAME]
+Filing Date: [DATE]
+
+---
+
+FIELD OF THE INVENTION
+
+This invention relates to artificial neural networks, machine
+learning systems, and persistent memory architectures for artificial
+intelligence agents. More specifically, it describes: (1) a
+spatially-embedded neural network architecture using heterogeneous
+biological cell types to produce calibrated uncertainty estimation;
+(2) neuromodulator-driven learning rate control with self-limiting
+autoreceptor feedback; (3) activity-dependent myelination for
+plasticity gating and compositional inference; (4) a sleep-cycle
+consolidation mechanism for offline memory processing; and (5) a
+self-reinforcing episodic memory retrieval system using signed
+associative links, reciprocal rank fusion, and Hebbian path
+reinforcement, designed to integrate with the neural computation
+substrate as a hippocampal analog.
+
+---
+
+BACKGROUND OF THE INVENTION
+
+Large language models (LLMs) and conventional deep neural networks
+exhibit systematic failure modes collectively described as
+"hallucination" — confident generation of factually incorrect,
+internally inconsistent, or ungrounded outputs. Several structural
+causes have been proposed:
+
+1. Dense, globally-connected architectures allow gradient information
+   to flow between any two parameters, enabling the network to fit
+   arbitrary input-output mappings without structural constraint on
+   which representations should co-vary.
+
+2. Conventional training objectives (cross-entropy, MSE) optimize
+   for prediction accuracy but not for calibration — the degree to
+   which a model's confidence tracks its actual accuracy.
+
+3. Existing calibration techniques (temperature scaling, Platt
+   scaling, conformal prediction) operate post-hoc on trained models
+   and do not address the structural causes of overconfidence.
+
+4. Agent memory systems for LLMs store and retrieve episodic context
+   but do not adapt their retrieval pathways based on which paths
+   have historically produced useful results. Links between memory
+   entries are created passively but not reinforced or pruned based
+   on retrieval utility.
+
+The present invention addresses these failure modes through a
+combination of structural constraints borrowed from biological neural
+computation, and a dynamically self-reinforcing memory retrieval
+system that employs Hebbian-inspired path strengthening.
+
+---
+
+SUMMARY OF THE INVENTION
+
+The invention comprises six embodiments, all implementable
+independently or in combination:
+
+**Embodiment 1: Spatially-Embedded Heterogeneous Neural Network
+(VBrain Core Architecture)**
+
+A neural network wherein neurons are embedded as cells in a
+three-dimensional space with local connectivity defined by Voronoi
+tessellation. Unlike graph neural networks that process
+graph-structured data, the spatial substrate IS the compute
+architecture. Three heterogeneous cell types are assigned in
+biologically-motivated ratios:
+
+  - Excitatory cells (~80%): standard feedforward nodes with tanh
+    activation, receive and transmit positive signals
+  - Inhibitory cells (~15%): ReLU activation, output subtracted
+    from excitatory neighbors, local connectivity only (1-hop),
+    implement learned suppression without explicit "I don't know"
+    training targets
+  - Astrocyte cells (~5%): no signal transmission, observe local
+    excitatory activity and adjust neighbor gain coefficients,
+    implement local homeostasis
+
+Key empirical result: At 1000 nodes, this architecture achieves
+98.5% fact accuracy (vs. 92.1% for dense baseline) AND an abstain
+rate of 66.9% on ambiguous inputs (vs. 36.3% for dense baseline).
+The spatial constraint combined with cell-type diversity produces
+calibrated uncertainty estimation WITHOUT explicit calibration
+training objectives. The gap between the biological architecture and
+dense baseline INCREASES with scale, suggesting the benefit is
+structural rather than incidental.
+
+**Embodiment 2: Hebbian Myelination for Activity-Dependent
+Plasticity Gating**
+
+Per-edge myelination values are maintained on multi-hop (2-hop+)
+connections. Myelination grows proportional to co-activation of
+connected cell pairs ("neurons that fire together wire together")
+according to:
+
+  myelin[e] += rate × (coact[e] / max_coact − 0.5)
+
+bounded within [0.1, 3.0]. Myelination scales edge signal strength
+during forward pass and modulates gradient magnitude during
+backpropagation, implementing:
+
+  1. Self-organizing white matter: frequently-used pathways
+     strengthen autonomously; unused pathways atrophy
+  2. Plasticity resistance: highly myelinated edges resist further
+     weight change, protecting consolidated knowledge from
+     catastrophic forgetting
+  3. Critical period dynamics: early training sees high plasticity;
+     late training sees protection of learned structure
+
+**Embodiment 3: Neuromodulator-Driven Learning Rate Control**
+
+Three global scalar neuromodulator channels modulate network-wide
+behavior:
+
+  - Dopamine (DA): tracks prediction reward. Computed as inverse
+    loss improvement — when loss decreases, DA rises, boosting
+    learning rate. Models "reinforce what just worked."
+    
+  - Norepinephrine (NE): tracks prediction surprise. Computed from
+    loss spikes (sudden error increases). Boosts network gain
+    temporarily. Models "pay attention to unexpected events."
+    
+  - Serotonin (5HT): tracks stability. Builds when loss slope ≈ 0
+    (truly flat, not merely decreasing). Reduces plasticity.
+    Models "we're good, stop changing."
+
+Each modulator has distinct decay time constants:
+  DA decay: ~0.95 per epoch (moderate afterglow)
+  NE decay: ~0.80 per epoch (brief alert signal)
+  5HT decay: ~0.995 per epoch (stable mood)
+
+The effective learning rate is computed as:
+  effective_LR = base_LR × DA × (1 − 5HT × 0.5) / (1 + NE × 0.3)
+
+Self-limiting autoreceptor feedback is implemented via
+Michaelis-Menten kinetics:
+  emission = base_rate × 1 / (1 + level / half_saturation)
+
+This prevents runaway modulator amplification and produces
+naturally bounded dynamics without clamping.
+
+Load averages at 1, 10, and 100 epoch windows are maintained for
+each modulator, providing a unix-style display of modulator trends
+analogous to CPU load averages.
+
+**Embodiment 4: Neurochemically-Gated Sleep Cycle Consolidation**
+
+Offline consolidation (sleep) is triggered by neurochemical
+conditions, not by a fixed schedule:
+
+  sleep_condition: 5HT > 0.7 AND NE < 0.1 AND DA < 1.1
+
+This mirrors biological sleep onset: the brain sleeps when calm
+(high serotonin), not alert (low norepinephrine), not highly
+rewarded (moderate dopamine).
+
+Sleep phases:
+  - NREM (early sleep, low noise): memory replay with boosted
+    learning rate, low activation noise. High-fidelity
+    consolidation of recent experiences.
+  - REM (late sleep, high noise): memory replay with elevated
+    stochastic noise. Creative recombination of existing
+    representations.
+  - Synaptic pruning: edges below weight threshold are zeroed,
+    reducing interference between overlapping memories.
+
+Wake signal resets neurochemistry:
+  5HT ×= 0.3  (burned off as melatonin)
+  NE  = 0.5   (morning alertness spike)
+  DA  = 1.3   (fresh start, high plasticity)
+
+This neurochemically-gated sleep cycle is distinct from techniques
+such as experience replay in reinforcement learning (which replay
+experiences uniformly or prioritized by TD error) and from
+gradient accumulation (which operates within the forward/backward
+pass). It models the homeostatic drive to sleep as an emergent
+property of the modulator system itself.
+
+**Embodiment 5: Self-Reinforcing Episodic Memory Retrieval with
+Signed Associative Links (Hippocampus System)**
+
+A persistent memory retrieval system for AI agents comprising:
+
+  5a. SIGNED ASSOCIATIVE LINKS: Memory entries are connected by
+  bidirectional links with scalar scores in [-1.0, +1.0]. Positive
+  scores indicate supporting/extending relationships. Negative
+  scores indicate contradicting, superseded, or failed-approach
+  relationships ("anti-memories"). Unlike knowledge graph systems
+  that represent only positive relationships, signed links preserve
+  negative evidence as a first-class retrieval signal.
+
+  5b. MULTI-CHANNEL RECIPROCAL RANK FUSION (RRF): Retrieval
+  combines three parallel channels:
+    - Semantic/vector similarity (VSIM)
+    - Full-text keyword search (BM25/FT.SEARCH)
+    - Graph traversal with multiplicative decay
+
+  Channels are fused via Reciprocal Rank Fusion:
+    RRF(entry) = Σ(1 / (k + rank_in_channel_i))
+  where k is a smoothing constant (default 60).
+
+  5c. MULTIPLICATIVE-DECAY GRAPH TRAVERSAL: Starting from direct
+  search results ("seeds"), the graph traversal channel follows
+  associative links up to N hops, with path score computed as:
+    score(A→B→C) = |score(A→B)| × |score(B→C)| × decay_factor^hop
+
+  Ranking is performed on absolute score (|score|), enabling
+  anti-memories (negative-scored links) to compete for retrieval
+  on equal footing with positive associations. The sign is
+  preserved through to output, allowing the consuming agent to
+  distinguish "this is relevant because it supports the query"
+  from "this is relevant because it's a prior dead end or rejected
+  approach."
+
+  Multiplicative decay creates exponential signal death for weak
+  paths without requiring hard per-hop candidate caps, providing
+  natural self-limiting fan-out analogous to synaptic attenuation
+  in biological spreading activation.
+
+  5d. HEBBIAN PATH REINFORCEMENT: When the graph traversal
+  channel surfaces entries that survive multi-channel fusion into
+  the final output, those traversal paths are recorded. A
+  background consolidation process (daemon) subsequently:
+    - Strengthens existing links along paths that proved useful
+      (score += reinforcement_delta, bounded at 1.0)
+    - Creates "shortcut" links between entries that were repeatedly
+      co-retrieved via intermediate nodes (A→C direct link where
+      A→B→C path proved useful), reducing future retrieval depth
+
+  This implements a Hebbian learning rule at the retrieval system
+  level: retrieval paths that "fire together" (co-occur in
+  successful recall) "wire together" (become directly linked),
+  creating an adaptive retrieval graph that improves with use.
+
+  5e. TIERED CONTEXT INJECTION: Retrieved entries are ranked by
+  fused RRF score and injected into the AI agent's context window
+  in decreasing content density:
+    - Top tier (configurable ratio, default 20%): full content
+    - Middle tier (configurable ratio, default 30%): condensed
+      summary
+    - Bottom tier (remainder): one-line breadcrumb with ID for
+      on-demand retrieval
+
+**Embodiment 6: Biologically-Constrained Hybrid Inference Pipeline**
+
+A complete inference pipeline combining Embodiments 1-5:
+
+  Hippocampus System (Embodiments 5a-5e)
+       ↓ episodic context injection
+  Biological Voronoi Network (Embodiments 1-4)
+       ↓ calibrated confidence gating
+  Large Language Model
+       ↓ language generation
+
+The Hippocampus System provides pre-consolidated episodic context
+including anti-memory signals (prior failures, superseded approaches)
+to the spatial neural network. The spatial network, by virtue of its
+structural calibration properties (Embodiment 1), gates LLM output
+with calibrated uncertainty estimates — providing high confidence
+only for outputs consistent with consolidated spatial knowledge, and
+flagging uncertainty for outputs in ambiguous or novel territory.
+
+This pipeline addresses the fundamental asymmetry of current hybrid
+systems: LLMs have vast breadth but poor calibration; local networks
+have narrow scope but genuine uncertainty awareness. The combination
+uses each component where it excels.
+
+---
+
+DETAILED DESCRIPTION OF PREFERRED EMBODIMENTS
+
+**1. Voronoi Graph Construction**
+
+Given N seed points distributed by Lloyd relaxation in a bounded
+3D volume, the Voronoi tessellation assigns each spatial point to
+its nearest seed, producing N spatial cells. Two cells are adjacent
+if their Voronoi boundaries share a face, which is detected via
+a voxel grid: a 3D grid of resolution R is constructed, each voxel
+assigned to its nearest cell center; cells sharing a voxel boundary
+are marked adjacent.
+
+Multi-hop connectivity is determined by BFS from each cell: cells
+reachable in exactly 1 step are 1-hop neighbors; cells reachable in
+exactly 2 steps through intermediate cells are 2-hop neighbors.
+2-hop connections are initialized with weights scaled by 1/hop to
+reflect increasing biological cost of long-range wiring.
+
+Cell types are assigned stochastically at construction: 80%
+excitatory, 15% inhibitory, 5% astrocyte (ratios configurable).
+
+**2. Forward Pass with Biological Dynamics**
+
+The forward pass is a multi-phase message-passing process operating
+over T timesteps:
+
+Phase 1 (activation computation): For each non-astrocyte cell i:
+  sum_i = bias_i + self_weight_i × prev_i
+        + Σ_{j→i} edge_weight(j,i) × myelin(j,i) × prev_j × astro_gain_i
+
+  For inhibitory sources j: signal is negated (−|signal|)
+  Activation: tanh(sum_i) for excitatory; tanh(sum_i) if sum>0 else 0 for inhibitory
+
+Phase 2 (astrocyte homeostasis): For each astrocyte a:
+  For each excitatory neighbor e:
+    if act_e > high_threshold: astro_gain_e ×= dampening_rate
+    if act_e < low_threshold:  astro_gain_e ×= boosting_rate
+  Bounded within [0.1, 3.0]
+
+Phase 3 (Hebbian accumulation): For each edge (i,j):
+  coact[i,j] += |act_i| × |act_{j,prev}|
+
+**3. Myelination Update**
+
+After each training batch:
+  max_coact = max(coact)
+  for 2-hop edge e:
+    myelin[e] += rate × (coact[e]/max_coact − 0.5)
+    myelin[e] = clamp(myelin[e], 0.1, 3.0)
+  coact[:] = 0  // reset accumulators
+
+**4. Neuromodulator Update**
+
+After each training epoch:
+  DA: delta = (prev_loss − current_loss) / base_LR
+      DA = DA × decay + delta × (1 − decay), bounded [0.5, 2.0]
+  NE: surprise = max(0, current_loss − prev_loss) / base_LR
+      NE = NE × decay + surprise × scale, bounded [0, 2.0]
+  5HT: slope of loss history over window W
+       if slope > −ε (flat): 5HT builds toward stability target
+       if slope < −ε (decreasing): 5HT decays
+
+**5. Sleep Triggering and Phases**
+
+Every K epochs, check sleep condition:
+  if 5HT > 5ht_threshold AND NE < ne_threshold AND DA < da_threshold:
+    sleep_phase_1: replay M memories, learning_rate × boost, noise=0
+    sleep_phase_2: replay M memories, learning_rate × boost, noise=σ
+    prune: zero edges where |weight| < prune_threshold
+    wake: 5HT ×= melatonin_factor; NE = ne_morning; DA = da_morning
+
+**6. Graph Traversal and Hebbian Reinforcement**
+
+Graph traversal (Embodiment 5c):
+  seeds = top_K results from VSIM + FT.SEARCH
+  hop1_candidates = {}
+  for seed in seeds:
+    for (target_id, score, type) in links[seed.id]:
+      if |score| >= min_score:
+        hop1_candidates.add(target_id, absScore=|score|, sign=sign(score))
+
+  hop2_candidates = {}
+  for h1 in hop1_candidates:
+    for (target_id, score, type) in links[h1.id]:
+      decayed = h1.absScore × |score| × decay_factor
+      if decayed >= min_score:
+        hop2_candidates.add(target_id, absScore=decayed, sign=sign(score))
+
+  all_candidates = hop1_candidates ∪ hop2_candidates
+  sorted by absScore descending, take top_K
+  fetch entry content; assign final Score = sign × absScore
+
+Hebbian reinforcement (Embodiment 5d):
+  After RRF fusion identifies final output set:
+    survivors = graph_results ∩ final_output
+    record traversed:<prompt_id> = {survivor_ids}
+
+  Background daemon, per consolidation cycle:
+    for survivor in traversed[prompt_id]:
+      for seed in recalled[prompt_id]:
+        if link(seed, survivor) exists:
+          link.score = min(1.0, link.score + reinforcement_boost)
+        else:
+          // hop-2 shortcut: not directly linked but co-surfaced
+          create link(seed, survivor, score=0.5, type="shortcut")
+
+---
+
+CLAIMS (ILLUSTRATIVE — FOR PROVISIONAL PURPOSES)
+
+The following are illustrative claim directions for the non-provisional
+application. A provisional application does not require formal claims.
+
+1. A method for training an artificial neural network comprising:
+   embedding a plurality of artificial neurons as cells in a
+   three-dimensional spatial substrate with connectivity defined by
+   Voronoi tessellation; assigning heterogeneous cell types including
+   excitatory, inhibitory, and astrocyte cells in biologically-
+   motivated ratios; wherein inhibitory cells subtract their outputs
+   from connected excitatory neighbors and wherein astrocyte cells
+   modulate excitatory neighbor gain based on local activity;
+   training said network using backpropagation; whereby the trained
+   network produces calibrated uncertainty estimates without explicit
+   calibration training objectives.
+
+2. The method of claim 1, further comprising maintaining per-edge
+   myelination values on multi-hop connections that increase with
+   co-activation of connected cell pairs and scale edge signal
+   strength during forward pass.
+
+3. A system for modulating learning rate in an artificial neural
+   network comprising: a dopamine channel tracking prediction reward
+   signal; a norepinephrine channel tracking prediction surprise; a
+   serotonin channel tracking loss stability; wherein the effective
+   learning rate is computed as a function of all three channels;
+   and wherein each channel employs autoreceptor feedback via
+   Michaelis-Menten kinetics to prevent runaway amplification.
+
+4. The system of claim 3, further comprising a neurochemically-gated
+   sleep cycle triggered when serotonin exceeds a threshold and
+   norepinephrine and dopamine are below respective thresholds;
+   wherein said sleep cycle comprises sequential low-noise and
+   high-noise memory replay phases followed by synaptic pruning and
+   neurochemical reset.
+
+5. A memory retrieval system for artificial intelligence agents
+   comprising: a plurality of memory entries connected by
+   bidirectional signed associative links with scores in [-1.0,
+   +1.0]; a multi-channel retrieval system combining semantic
+   similarity, keyword search, and graph traversal channels via
+   Reciprocal Rank Fusion; wherein graph traversal follows
+   associative links with multiplicative score decay per hop;
+   wherein link traversal ranks candidates by absolute score,
+   preserving sign for anti-memory identification; and wherein
+   entries surfaced by graph traversal that survive multi-channel
+   fusion are recorded for subsequent Hebbian path reinforcement.
+
+6. The system of claim 5, wherein Hebbian path reinforcement
+   comprises: strengthening existing link scores along traversal
+   paths that proved retrieval-useful; and creating direct shortcut
+   links between seed entries and hop-N survivors that lacked direct
+   connections.
+
+7. A hybrid inference pipeline comprising: a persistent episodic
+   memory system as described in claim 5; a spatially-embedded
+   neural network as described in claim 1; and a large language
+   model; wherein the episodic memory system provides context
+   including anti-memory signals to the spatial neural network,
+   and wherein the spatial neural network provides calibrated
+   confidence gating for large language model output.
+
+---
+
+EXPERIMENTAL RESULTS
+
+**VBrain Results (Embodiments 1-4):**
+
+At 1000 nodes, 5000 training epochs, 116-fact ontology training set:
+
+  Metric                  Bio-Voronoi    Dense Baseline
+  ───────────────────────────────────────────────────
+  Fact recall accuracy    98.5%          92.1%
+  Probe confidence        0.276          0.435
+  Abstain rate            66.9%          36.3%
+  Parameters              ~49,000        ~49,000
+
+The biological Voronoi architecture dominates both dimensions
+simultaneously — better memory AND better uncertainty. This result
+holds at 1000 nodes but not at 150 nodes (dense wins at small scale),
+confirming the benefit is scale-dependent and structural.
+
+Secondary findings:
+- Hebbian myelination produced self-organized white matter (avg
+  myelin dropped from 1.0 to 0.48 — unused paths atrophied)
+- Astrocyte gains self-organized into regional tuning (range 0.45–2.81)
+- All neuromodulator-related failure modes map to known neurological
+  conditions: DA cycling → bipolar; 5HT oversuppression → flat affect;
+  excitatory runaway → status epilepticus; serotonin plateau →
+  learned helplessness; excitotoxic damage → neurodegeneration
+
+**Hippocampus Retrieval System (Embodiment 5):**
+
+System tested with 9,354 memory entries across 10 topic domains over
+a multi-week deployment period. Graph traversal channel successfully
+identified cross-domain associative connections not surfaced by text
+search alone. Hebbian reinforcement confirmed via `traversed:*` key
+records (4 surviving graph-traversed entries recorded per typical
+prompt on topically dense queries). Multiplicative decay confirmed
+to produce natural self-limiting fan-out: 100 candidates collected
+from 10 seeds across 2 hops with min_score threshold of 0.4.
+
+---
+
+BRIEF DESCRIPTION OF DRAWINGS
+
+[Figure 1: Three-dimensional Voronoi tessellation showing spatial
+embedding of excitatory (blue), inhibitory (red), and astrocyte
+(green) cells with Voronoi cell boundaries visible as mesh surfaces.]
+
+[Figure 2: Comparison of calibration curves — biological Voronoi
+vs. dense baseline at 1000 nodes, showing probe confidence vs.
+abstain rate as function of training scale.]
+
+[Figure 3: Myelination self-organization over 5000 training epochs
+— histogram of edge myelin values showing bimodal distribution
+(used/unused) by epoch 5000.]
+
+[Figure 4: Neuromodulator load averages DA/NE/5HT over a training
+run showing sleep-wake cycles, dopamine reward peaks, and serotonin
+plateau dynamics.]
+
+[Figure 5: Memory retrieval graph showing entry nodes, signed
+associative links (positive=solid, negative=dashed), and
+retrieval paths with hop-1 and hop-2 candidates highlighted by
+the graph traversal channel.]
+
+[Figure 6: Full hybrid inference pipeline block diagram — Hippocampus
+episodic memory → anti-memory signals + context → VBrain spatial
+network → calibrated confidence → LLM → output.]
+
+---
+
+CORRESPONDENCE INFORMATION
+
+[INVENTOR NAME]
+[ADDRESS]
+[EMAIL]
+[PHONE]
+
+Ruthlessly Practical LLC
+[ADDRESS]
+
+---
+
+END OF PROVISIONAL PATENT APPLICATION

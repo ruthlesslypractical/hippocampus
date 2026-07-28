@@ -6,7 +6,6 @@ package epistemic
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/ruthlesslypractical/hippocampus/internal/config"
 	"github.com/ruthlesslypractical/hippocampus/internal/ollama"
 	"github.com/ruthlesslypractical/hippocampus/internal/util"
+	"github.com/ruthlesslypractical/hippocampus/pkg/modelresponse"
 )
 
 // Verifier runs the multi-pass verification pipeline on epistemic entries
@@ -265,7 +265,7 @@ RESPOND WITH ONLY THIS JSON FORMAT, NOTHING ELSE:
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("pass 1 (support): %w", err)
 	}
-	support := parseVerifyResponse(supportResp)
+	support := parseVerifyResponse(supportResp, v.cfg.ResponseTrunc)
 
 	// Pass 2: Counter-evidence assessment
 	counterPrompt := fmt.Sprintf(`/no_think
@@ -288,7 +288,7 @@ RESPOND WITH ONLY THIS JSON FORMAT, NOTHING ELSE:
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("pass 2 (counter): %w", err)
 	}
-	counter := parseVerifyResponse(counterResp)
+	counter := parseVerifyResponse(counterResp, v.cfg.ResponseTrunc)
 
 	// Pass 3: Reconciliation — weigh both sides
 	result := reconcile(entry, support, counter)
@@ -302,17 +302,15 @@ type verifyPassResult struct {
 	Evidence   string  `json:"evidence"`
 }
 
-func parseVerifyResponse(response string) verifyPassResult {
+func parseVerifyResponse(response string, responseTrunc int) verifyPassResult {
+	if responseTrunc <= 0 {
+		responseTrunc = 300
+	}
 	response = strings.TrimSpace(response)
 
-	// Try to find JSON in the response
-	start := strings.Index(response, "{")
-	end := strings.LastIndex(response, "}")
-	if start != -1 && end > start {
-		var result verifyPassResult
-		if err := json.Unmarshal([]byte(response[start:end+1]), &result); err == nil {
-			return result
-		}
+	// Try ParseJSON first (handles preamble/postamble cleanly)
+	if result, err := modelresponse.ParseJSON[verifyPassResult](response); err == nil {
+		return result
 	}
 
 	// Fallback: try to extract a confidence number from free-form text

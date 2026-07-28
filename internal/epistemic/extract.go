@@ -6,12 +6,12 @@ package epistemic
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/ruthlesslypractical/hippocampus/internal/config"
 	"github.com/ruthlesslypractical/hippocampus/internal/ollama"
+	"github.com/ruthlesslypractical/hippocampus/pkg/modelresponse"
 )
 
 // Extractor handles triple extraction from text using Ollama.
@@ -41,7 +41,7 @@ func (e *Extractor) Extract(ctx context.Context, text string, vocabulary []strin
 		return nil, fmt.Errorf("ollama generate: %w", err)
 	}
 
-	return parseTriples(resp)
+	return parseTriples(resp, e.cfg.ResponseTrunc)
 }
 
 // buildExtractionPrompt constructs the prompt with vocabulary injection.
@@ -83,7 +83,12 @@ Output ONLY a JSON array. No markdown, no explanation:
 }
 
 // parseTriples parses the JSON response from Ollama into Triple structs.
-func parseTriples(response string) ([]Triple, error) {
+// parseTriples extracts JSON triples from a raw LLM response.
+// responseTrunc controls how many chars of the raw response appear in error messages (0 = use default 300).
+func parseTriples(response string, responseTrunc int) ([]Triple, error) {
+	if responseTrunc <= 0 {
+		responseTrunc = 300
+	}
 	response = strings.TrimSpace(response)
 
 	// Strip markdown code fences if present
@@ -114,7 +119,8 @@ func parseTriples(response string) ([]Triple, error) {
 		if strings.Contains(response, "[]") {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("no JSON array found in response: %.200s", response)
+		return nil, fmt.Errorf("no JSON array found in response: %s",
+			modelresponse.Truncate(response, responseTrunc))
 	}
 
 	if end == -1 || end <= start {
@@ -123,21 +129,19 @@ func parseTriples(response string) ([]Triple, error) {
 		// and close the array there.
 		lastBrace := strings.LastIndex(response[start:], "}")
 		if lastBrace == -1 {
-			return nil, fmt.Errorf("truncated response with no complete objects: %.200s", response)
+			return nil, fmt.Errorf("truncated response with no complete objects: %s",
+				modelresponse.Truncate(response, responseTrunc))
 		}
 		response = response[start:start+lastBrace+1] + "]"
 	} else {
 		response = response[start : end+1]
 	}
 
-	var triples []Triple
-	if err := json.Unmarshal([]byte(response), &triples); err != nil {
-		// One more attempt: the truncation might have left a trailing comma
-		// e.g. [{"subject":"x",...},{"subject":"y",...},]
-		cleaned := strings.TrimRight(strings.TrimSpace(response[:len(response)-1]), ",") + "]"
-		if err2 := json.Unmarshal([]byte(cleaned), &triples); err2 != nil {
-			return nil, fmt.Errorf("unmarshal triples: %w (response: %.300s)", err, response)
-		}
+	// Use modelresponse.ParseJSONArray which handles trailing-comma cleanup
+	triples, err := modelresponse.ParseJSONArray[Triple](response)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal triples: %w (response: %s)", err,
+			modelresponse.Truncate(response, responseTrunc))
 	}
 
 	// Simon Says filter: only approved verbs survive. Everything else → shredder.

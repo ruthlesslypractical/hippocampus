@@ -155,16 +155,30 @@ func handleRecall(ctx context.Context, client *redis.Client, event HookEvent, cf
 	keywords := extractKeywords(event.Prompt)
 
 	// Strategy 1: Tag-based search
+	var tagResults []memoryEntry
 	if len(keywords) > 0 {
-		tagResults := searchByTagOverlap(ctx, client, keywords, mem.RecallMaxEntries)
-		contextResults = append(contextResults, tagResults...)
+		tagResults = searchByTagOverlap(ctx, client, keywords, mem.RecallMaxEntries)
 	}
 
 	// Strategy 2: Full-text search
 	ftResults := searchFullText(ctx, client, event.Prompt, mem.RecallMaxEntries)
-	contextResults = append(contextResults, ftResults...)
 
-	// Deduplicate and exclude orientation
+	// Strategy 3: Graph traversal channel (link following with decay)
+	// Seeds come from tag + FT results before dedup/filtering
+	graphSeeds := dedupeResults(append(append([]memoryEntry{}, tagResults...), ftResults...))
+	graphSeeds = excludeIDs(graphSeeds, orientationResults)
+	graphResults := traverseLinks(ctx, client, graphSeeds, cfg.Hook.LinkFollow)
+	graphResults = excludeIDs(graphResults, orientationResults)
+	graphResults = excludeByTag(graphResults, "content:full")
+
+	// RRF Fusion: merge all channels by reciprocal rank
+	rrfK := cfg.Hook.RRFConstant
+	if rrfK <= 0 {
+		rrfK = 60
+	}
+	contextResults = rrfFuse([][]memoryEntry{tagResults, ftResults}, graphResults, rrfK)
+
+	// Deduplicate (RRF handles merge but just in case)
 	contextResults = dedupeResults(contextResults)
 	contextResults = excludeIDs(contextResults, orientationResults)
 
@@ -186,29 +200,8 @@ func handleRecall(ctx context.Context, client *redis.Client, event HookEvent, cf
 
 	contextResults = capToBudget(contextResults, mem.RecallMaxChars, mem.RecallMaxEntries)
 
-	// Strategy 3: Follow associative links
-	maxLinkHops := cfg.Hook.MaxLinkHops
-	if maxLinkHops == 0 {
-		maxLinkHops = 3
-	}
-	linkedResults := followLinks(ctx, client, contextResults, maxLinkHops, cfg.Hook.MinLinkFollowScore)
-	linkedResults = excludeIDs(linkedResults, orientationResults)
-	linkedResults = excludeIDs(linkedResults, contextResults)
-	linkedResults = excludeByTag(linkedResults, "content:full") // Also exclude from link-following
-	// Links get their own budget (don't compete with search results)
-	linkBudgetChars := cfg.Hook.LinkBudgetChars
-	if linkBudgetChars <= 0 {
-		linkBudgetChars = 3000
-	}
-	linkBudgetEntries := cfg.Hook.LinkBudgetEntries
-	if linkBudgetEntries <= 0 {
-		linkBudgetEntries = 3
-	}
-	linkedResults = capToBudget(linkedResults, linkBudgetChars, linkBudgetEntries)
-
-	// Combine: orientation first, then contextual, then linked
+	// Combine: orientation first, then RRF-fused contextual results (includes graph channel)
 	allResults := append(orientationResults, contextResults...)
-	allResults = append(allResults, linkedResults...)
 
 	if len(allResults) == 0 {
 		return
@@ -217,10 +210,10 @@ func handleRecall(ctx context.Context, client *redis.Client, event HookEvent, cf
 	// Epistemic warnings: check if any topic keywords match contested/false claims
 	epistemicWarnings := getEpistemicWarnings(ctx, client, keywords)
 
-	// Format output for injection — TIERED:
-	// Tier 1 (top 1): full content
-	// Tier 2 (next 2-4): summary or truncated content
-	// Tier 3 (remaining): one-line breadcrumb + entry ID
+	// Format output for injection — TIERED by configurable ratios:
+	// Tier 1 (top tier1Ratio): full content
+	// Tier 2 (next tier2Ratio): summary or truncated content
+	// Tier 3 (remainder): one-line breadcrumb + entry ID
 	tier2MaxChars := cfg.Hook.Tier2MaxChars
 	if tier2MaxChars <= 0 {
 		tier2MaxChars = 300
@@ -229,6 +222,23 @@ func handleRecall(ctx context.Context, client *redis.Client, event HookEvent, cf
 	if tier3SnippetChars <= 0 {
 		tier3SnippetChars = 80
 	}
+	tier1Ratio := cfg.Hook.Tier1Ratio
+	if tier1Ratio <= 0 {
+		tier1Ratio = 0.2
+	}
+	tier2Ratio := cfg.Hook.Tier2Ratio
+	if tier2Ratio <= 0 {
+		tier2Ratio = 0.3
+	}
+	// Compute tier boundaries based on contextual result count (excludes orientation)
+	contextCount := len(allResults) - len(orientationResults)
+	tier1Count := int(math.Ceil(float64(contextCount) * tier1Ratio))
+	if tier1Count < 1 && contextCount > 0 {
+		tier1Count = 1
+	}
+	tier2Count := int(math.Ceil(float64(contextCount) * tier2Ratio))
+	// tier3 = remainder (no explicit count needed)
+
 	var out strings.Builder
 	out.WriteString(fmt.Sprintf("[MEMORY CONTEXT — retrieved from persistent memory (unix_now: %d)]\n", time.Now().Unix()))
 	for i, r := range allResults {
@@ -236,13 +246,13 @@ func handleRecall(ctx context.Context, client *redis.Client, event HookEvent, cf
 			// Orientation entries always injected in full
 			out.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, strings.Join(r.Tags, ", "), r.Content))
 		} else {
-			// Contextual + linked results: tiered injection
+			// Contextual results: tiered injection based on rank
 			rank := i - len(orientationResults)
-			if rank == 0 {
-				// Tier 1: full content (the single most relevant recall)
+			if rank < tier1Count {
+				// Tier 1: full content
 				out.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, strings.Join(r.Tags, ", "), r.Content))
-			} else if rank < 5 {
-				// Tier 2: summary/truncated (next few results)
+			} else if rank < tier1Count+tier2Count {
+				// Tier 2: summary/truncated
 				condensed := condensedContent(r, tier2MaxChars)
 				out.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, strings.Join(r.Tags, ", "), condensed))
 				if len(r.Content) > tier2MaxChars && r.Summary == "" {
@@ -386,6 +396,30 @@ func handleRecall(ctx context.Context, client *redis.Client, event HookEvent, cf
 		client.SAdd(ctx, recalledKey, recalledIDs...)
 		client.Expire(ctx, recalledKey, time.Duration(cfg.Daemon.RecalledTTLH)*time.Hour)
 		slog.Debug("recorded recalled entries", "prompt_id", promptID, "count", len(contextResults))
+	}
+
+	// Daemon integration: record graph-traversed entries that survived into final output.
+	// The daemon uses this for Hebbian reinforcement:
+	// - Strengthen links along paths that proved useful
+	// - Create shortcut links (A→C direct) when A→B→C paths survive RRF
+	if promptID != "" && len(graphResults) > 0 {
+		// Find which graph results actually made it into the final contextResults
+		finalIDs := make(map[string]bool)
+		for _, r := range contextResults {
+			finalIDs[r.ID] = true
+		}
+		var survivorIDs []interface{}
+		for _, r := range graphResults {
+			if finalIDs[r.ID] {
+				survivorIDs = append(survivorIDs, r.ID)
+			}
+		}
+		if len(survivorIDs) > 0 {
+			traversedKey := "traversed:" + promptID
+			client.SAdd(ctx, traversedKey, survivorIDs...)
+			client.Expire(ctx, traversedKey, time.Duration(cfg.Daemon.RecalledTTLH)*time.Hour)
+			slog.Debug("recorded traversed survivors", "prompt_id", promptID, "count", len(survivorIDs))
+		}
 	}
 }
 
@@ -592,7 +626,12 @@ func loadLeanKernel(ctx context.Context, client *redis.Client) []memoryEntry {
 		return []memoryEntry{{ID: "local:prompt-lean", Content: content, Tags: []string{"meta", "orientation", "lean-kernel"}}}
 	}
 
-	data, err := client.HGetAll(ctx, "entry:entry:meta:lean-kernel").Result()
+	// Prefer correct ID format (meta:lean-kernel), fall back to legacy (entry:meta:lean-kernel)
+	data, err := client.HGetAll(ctx, "entry:meta:lean-kernel").Result()
+	if err != nil || len(data) == 0 {
+		// Legacy fallback: the old ID had a double "entry:" prefix
+		data, err = client.HGetAll(ctx, "entry:entry:meta:lean-kernel").Result()
+	}
 	if err != nil || len(data) == 0 {
 		return loadFullOrientation(ctx, client)
 	}
@@ -628,25 +667,76 @@ func resetBootPhase(ctx context.Context, client *redis.Client, bootPhaseTTLH int
 
 // --- Search helpers ---
 
-func followLinks(ctx context.Context, client *redis.Client, entries []memoryEntry, maxLinks int, minLinkFollowScore float64) []memoryEntry {
-	if len(entries) == 0 {
+// NOTE: followLinks was the v2.0.0 single-hop link follower with separate budget.
+// Superseded by traverseLinks + rrfFuse in v2.0.1 (graph channel competes via RRF).
+// Future: daemon reinforcement of traversed paths (traversed:<promptID> sidecar).
+
+// graphCandidate holds a link-traversal candidate with its decayed score and sign.
+type graphCandidate struct {
+	id       string
+	absScore float64 // |score| after decay — used for ranking
+	sign     int     // +1 or -1 — carried through for anti-memory annotation
+	reason   string  // link reason (from HASH value)
+	linkType string  // extends, supports, etc.
+	hop      int     // which hop this was found at
+}
+
+// traverseLinks implements the graph traversal retrieval channel.
+// It collects up to MaxCandidates entries by following links from seed entries,
+// applying multiplicative decay per hop. Ranks by |score|, preserves sign.
+// Returns top_k candidates as memoryEntry with Score set to decayed |score|
+// and a negative Score for anti-memories.
+func traverseLinks(ctx context.Context, client *redis.Client, seeds []memoryEntry, cfg config.LinkFollowConfig) []memoryEntry {
+	if !cfg.Enabled || len(seeds) == 0 {
+		slog.Debug("graph traversal channel skipped", "enabled", cfg.Enabled, "seeds", len(seeds))
 		return nil
 	}
+	slog.Debug("graph traversal channel starting", "seeds", len(seeds), "max_hops", cfg.MaxHops, "min_score", cfg.MinScore)
 
-	type scoredLink struct {
+	maxHops := cfg.MaxHops
+	if maxHops <= 0 {
+		maxHops = 2
+	}
+	decayFactor := cfg.DecayFactor
+	if decayFactor <= 0 {
+		decayFactor = 0.5
+	}
+	minScore := cfg.MinScore
+	if minScore <= 0 {
+		minScore = 0.4
+	}
+	maxCandidates := cfg.MaxCandidates
+	if maxCandidates <= 0 {
+		maxCandidates = 100
+	}
+	topK := cfg.TopK
+	if topK <= 0 {
+		topK = 10
+	}
+
+	// Track seen IDs to avoid revisiting
+	seen := make(map[string]bool)
+	for _, s := range seeds {
+		seen[s.ID] = true
+	}
+
+	var candidates []graphCandidate
+
+	// Hop 1: direct links from seed entries
+	type frontier struct {
 		id       string
 		absScore float64
+		sign     int
+		reason   string
+		linkType string
 	}
+	var hop1Results []frontier
 
-	seen := make(map[string]bool)
-	for _, e := range entries {
-		seen[e.ID] = true
-	}
-
-	var candidates []scoredLink
-	for _, e := range entries {
-		// Read from unified HASH format: links:<id> with field=targetID, value="score|type"
-		results, err := client.HGetAll(ctx, "links:"+e.ID).Result()
+	for _, seed := range seeds {
+		if len(candidates) >= maxCandidates {
+			break
+		}
+		results, err := client.HGetAll(ctx, "links:"+seed.ID).Result()
 		if err != nil || len(results) == 0 {
 			continue
 		}
@@ -656,47 +746,214 @@ func followLinks(ctx context.Context, client *redis.Client, entries []memoryEntr
 			}
 			seen[targetID] = true
 
-			// Parse "score|type" value
+			// Parse "score|type" or "score|type|reason" value
 			score := 0.0
-			if parts := strings.SplitN(value, "|", 2); len(parts) >= 1 {
+			linkType := ""
+			reason := ""
+			parts := strings.SplitN(value, "|", 3)
+			if len(parts) >= 1 {
 				fmt.Sscanf(parts[0], "%f", &score)
 			}
-			abs := score
-			if abs < 0 {
-				abs = -abs
+			if len(parts) >= 2 {
+				linkType = parts[1]
 			}
-			// Only follow links with meaningful scores (skip unscored 0.0 links)
-			minFollow := minLinkFollowScore
-			if minFollow == 0 {
-				minFollow = 0.3
+			if len(parts) >= 3 {
+				reason = parts[2]
 			}
-			if abs < minFollow {
+
+			// Determine sign and absolute score
+			sign := 1
+			absScore := score
+			if score < 0 {
+				sign = -1
+				absScore = -score
+			}
+
+			// Apply hop-1 threshold (no decay on first hop)
+			if absScore < minScore {
 				continue
 			}
-			candidates = append(candidates, scoredLink{id: targetID, absScore: abs})
+
+			candidates = append(candidates, graphCandidate{
+				id: targetID, absScore: absScore, sign: sign,
+				reason: reason, linkType: linkType, hop: 1,
+			})
+			hop1Results = append(hop1Results, frontier{
+				id: targetID, absScore: absScore, sign: sign,
+				reason: reason, linkType: linkType,
+			})
 		}
 	}
 
-	// Sort by |score| descending
+	// Hop 2+: follow links from hop-1 results with multiplicative decay
+	if maxHops >= 2 {
+		for _, h1 := range hop1Results {
+			if len(candidates) >= maxCandidates {
+				break
+			}
+			results, err := client.HGetAll(ctx, "links:"+h1.id).Result()
+			if err != nil || len(results) == 0 {
+				continue
+			}
+			for targetID, value := range results {
+				if seen[targetID] {
+					continue
+				}
+				seen[targetID] = true
+
+				score := 0.0
+				linkType := ""
+				reason := ""
+				parts := strings.SplitN(value, "|", 3)
+				if len(parts) >= 1 {
+					fmt.Sscanf(parts[0], "%f", &score)
+				}
+				if len(parts) >= 2 {
+					linkType = parts[1]
+				}
+				if len(parts) >= 3 {
+					reason = parts[2]
+				}
+
+				sign := 1
+				absScore := score
+				if score < 0 {
+					sign = -1
+					absScore = -score
+				}
+
+				// Multiplicative decay: h1.absScore × thisScore × decayFactor
+				decayedScore := h1.absScore * absScore * decayFactor
+
+				if decayedScore < minScore {
+					continue
+				}
+
+				candidates = append(candidates, graphCandidate{
+					id: targetID, absScore: decayedScore, sign: sign,
+					reason: reason, linkType: linkType, hop: 2,
+				})
+			}
+		}
+	}
+
+	// Sort candidates by absScore descending
 	for i := 1; i < len(candidates); i++ {
 		for j := i; j > 0 && candidates[j].absScore > candidates[j-1].absScore; j-- {
 			candidates[j], candidates[j-1] = candidates[j-1], candidates[j]
 		}
 	}
 
-	if len(candidates) > maxLinks {
-		candidates = candidates[:maxLinks]
+	// Take top_k
+	if len(candidates) > topK {
+		candidates = candidates[:topK]
 	}
 
-	var linked []memoryEntry
+	// Fetch entries from Redis
+	var results []memoryEntry
 	for _, c := range candidates {
 		data, err := client.HGetAll(ctx, "entry:"+c.id).Result()
 		if err != nil || len(data) == 0 {
 			continue
 		}
-		linked = append(linked, parseEntry(data))
+		entry := parseEntry(data)
+		// Carry sign through: positive entries get positive Score,
+		// negative (anti-memory) entries get negative Score.
+		// Both rank by |score| in RRF, but the sign tells the consumer
+		// "this is something to NOTE AS A PRIOR DEAD END" vs "this supports your query".
+		entry.Score = float64(c.sign) * c.absScore
+		results = append(results, entry)
 	}
-	return linked
+
+	slog.Debug("graph traversal channel", "seeds", len(seeds), "candidates_collected", len(candidates), "results", len(results))
+	return results
+}
+
+// rrfEntry holds an entry with its fused RRF score and original link sign (if from graph channel).
+type rrfEntry struct {
+	entry    memoryEntry
+	rrfScore float64
+	linkSign int // 0 = not from graph channel, +1 = positive link, -1 = anti-memory
+}
+
+// rrfFuse merges multiple ranked channels via Reciprocal Rank Fusion.
+// Each channel is a ranked list (index 0 = rank 1). The RRF formula is:
+//
+//	score(entry) = Σ(1 / (k + rank_in_channel_i))
+//
+// Graph channel entries carry their link sign through for anti-memory annotation.
+func rrfFuse(channels [][]memoryEntry, graphResults []memoryEntry, k int) []memoryEntry {
+	if k <= 0 {
+		k = 60
+	}
+
+	type fusedEntry struct {
+		entry    memoryEntry
+		score    float64
+		linkSign int // 0 if not from graph, +1/-1 if from graph
+	}
+
+	scores := make(map[string]*fusedEntry)
+
+	// Process non-graph channels (tag search, full-text search)
+	for _, channel := range channels {
+		for rank, entry := range channel {
+			if existing, ok := scores[entry.ID]; ok {
+				existing.score += 1.0 / (float64(k) + float64(rank+1))
+			} else {
+				scores[entry.ID] = &fusedEntry{
+					entry:    entry,
+					score:    1.0 / (float64(k) + float64(rank+1)),
+					linkSign: 0,
+				}
+			}
+		}
+	}
+
+	// Process graph channel — rank by |Score|, carry sign
+	for rank, entry := range graphResults {
+		linkSign := 1
+		if entry.Score < 0 {
+			linkSign = -1
+		}
+		if existing, ok := scores[entry.ID]; ok {
+			existing.score += 1.0 / (float64(k) + float64(rank+1))
+			// If this entry also came from the graph, note its sign
+			if existing.linkSign == 0 {
+				existing.linkSign = linkSign
+			}
+		} else {
+			scores[entry.ID] = &fusedEntry{
+				entry:    entry,
+				score:    1.0 / (float64(k) + float64(rank+1)),
+				linkSign: linkSign,
+			}
+		}
+	}
+
+	// Convert to slice and sort by fused score descending
+	fused := make([]fusedEntry, 0, len(scores))
+	for _, fe := range scores {
+		fused = append(fused, *fe)
+	}
+	for i := 1; i < len(fused); i++ {
+		for j := i; j > 0 && fused[j].score > fused[j-1].score; j-- {
+			fused[j], fused[j-1] = fused[j-1], fused[j]
+		}
+	}
+
+	// Emit results with Score set to RRF fused score (negative for anti-memories)
+	results := make([]memoryEntry, len(fused))
+	for i, fe := range fused {
+		fe.entry.Score = fe.score
+		if fe.linkSign < 0 {
+			// Anti-memory: negate score so downstream can detect and annotate
+			fe.entry.Score = -fe.score
+		}
+		results[i] = fe.entry
+	}
+
+	return results
 }
 
 func searchByTagOverlap(ctx context.Context, client *redis.Client, keywords []string, maxEntries int) []memoryEntry {
@@ -1088,7 +1345,7 @@ func condensedContent(e memoryEntry, maxChars int) string {
 
 func entryWeight(e memoryEntry) float64 {
 	for _, t := range e.Tags {
-		if t == "summary:comprehensive" || strings.HasPrefix(t, "summary:track:") {
+		if t == "summary:comprehensive" || strings.HasPrefix(t, "summary:daily:") || strings.HasPrefix(t, "summary:weekly:") {
 			return 0.9
 		}
 		if strings.HasPrefix(t, "summary:") {
