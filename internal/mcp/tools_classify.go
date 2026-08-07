@@ -21,7 +21,7 @@ func (s *Server) getClassifyDeps() (*memory.RedisStore, *ollama.Client, error) {
 	if !ok {
 		return nil, nil, fmt.Errorf("classify tools require RedisStore (not available in this mode)")
 	}
-	ollamaClient := ollama.New(s.cfg.Ollama.BaseURL, s.cfg.Ollama.Model, s.cfg.Ollama.TimeoutMinutes)
+	ollamaClient := ollama.NewFromConfig(s.cfg.Ollama.BaseURL, s.cfg.Ollama.Model, s.cfg.Ollama.CACertPath, s.cfg.Ollama.TLSInsecure, s.cfg.Ollama.TimeoutMinutes)
 	return rs, ollamaClient, nil
 }
 

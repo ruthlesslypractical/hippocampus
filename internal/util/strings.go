@@ -25,3 +25,22 @@ func Dedupe(ss []string) []string {
 	}
 	return result
 }
+
+// EscapeRedisTag escapes special characters in a RediSearch TAG value.
+// TAG field queries use {} delimiters and certain characters must be escaped
+// with a backslash: , . < > { } [ ] " ' : ; ! @ # $ % ^ & * ( ) - + = ~
+func EscapeRedisTag(tag string) string {
+	var b []byte
+	for i := 0; i < len(tag); i++ {
+		ch := tag[i]
+		switch ch {
+		case ',', '.', '<', '>', '{', '}', '[', ']', '"', '\'',
+			':', ';', '!', '@', '#', '$', '%', '^', '&', '*',
+			'(', ')', '-', '+', '=', '~', ' ', '/', '\\':
+			b = append(b, '\\', ch)
+		default:
+			b = append(b, ch)
+		}
+	}
+	return string(b)
+}

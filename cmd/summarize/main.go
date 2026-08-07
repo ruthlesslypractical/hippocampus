@@ -169,7 +169,7 @@ func main() {
 		flagGlobal = true
 	}
 
-	store, err := memory.NewLightStore(cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB)
+	store, err := memory.NewRedisStore(cfg.Redis, nil)
 	if err != nil {
 		slog.Error("connecting to Valkey failed", "err", err)
 		os.Exit(1)
@@ -182,14 +182,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ollamaClient := ollama.New(cfg.Ollama.BaseURL, cfg.Ollama.Model, cfg.Ollama.TimeoutMinutes)
+	ollamaClient := ollama.NewFromConfig(cfg.Ollama.BaseURL, cfg.Ollama.Model, cfg.Ollama.CACertPath, cfg.Ollama.TLSInsecure, cfg.Ollama.TimeoutMinutes)
 	ollamaClient.WedgeTimeout = time.Duration(cfg.Ollama.WedgeTimeoutSeconds) * time.Second
 	if flagClassify {
 		classifyTimeout := cfg.Ollama.TimeoutMinutes
 		if classifyTimeout < 30 {
 			classifyTimeout = 30
 		}
-		ollamaClient = ollama.New(cfg.Ollama.BaseURL, cfg.Ollama.Model, classifyTimeout)
+		ollamaClient = ollama.NewFromConfig(cfg.Ollama.BaseURL, cfg.Ollama.Model, cfg.Ollama.CACertPath, cfg.Ollama.TLSInsecure, classifyTimeout)
 		ollamaClient.WedgeTimeout = time.Duration(cfg.Ollama.WedgeTimeoutSeconds) * time.Second
 	}
 	if modelOverride != "" {
@@ -197,7 +197,7 @@ func main() {
 		if flagClassify && timeout < 30 {
 			timeout = 30
 		}
-		ollamaClient = ollama.New(cfg.Ollama.BaseURL, modelOverride, timeout)
+		ollamaClient = ollama.NewFromConfig(cfg.Ollama.BaseURL, modelOverride, cfg.Ollama.CACertPath, cfg.Ollama.TLSInsecure, timeout)
 		ollamaClient.WedgeTimeout = time.Duration(cfg.Ollama.WedgeTimeoutSeconds) * time.Second
 		slog.Info("using model override", "model", modelOverride)
 	}
@@ -982,6 +982,7 @@ func getTodayEntries(ctx context.Context, client *redis.Client, track string) []
 	for _, e := range entries {
 		isSummary := false
 		isClassified := false
+		hasExplicitTrack := false
 		for _, tag := range e.Tags {
 			if strings.HasPrefix(tag, "summary:") {
 				isSummary = true
@@ -989,8 +990,12 @@ func getTodayEntries(ctx context.Context, client *redis.Client, track string) []
 			if tag == "classified" {
 				isClassified = true
 			}
+			if tag == "track:"+track || tag == "track_auto:"+track {
+				hasExplicitTrack = true
+			}
 		}
-		if !isSummary && isClassified {
+		// Include if: not a summary AND (classified OR has explicit track tag)
+		if !isSummary && (isClassified || hasExplicitTrack) {
 			filtered = append(filtered, e)
 		}
 	}
@@ -1010,6 +1015,7 @@ func getTrackEntries(ctx context.Context, client *redis.Client, track string, li
 	for _, e := range entries {
 		isSummary := false
 		isClassified := false
+		hasExplicitTrack := false
 		for _, tag := range e.Tags {
 			if strings.HasPrefix(tag, "summary:") {
 				isSummary = true
@@ -1017,8 +1023,11 @@ func getTrackEntries(ctx context.Context, client *redis.Client, track string, li
 			if tag == "classified" {
 				isClassified = true
 			}
+			if tag == "track:"+track || tag == "track_auto:"+track {
+				hasExplicitTrack = true
+			}
 		}
-		if !isSummary && isClassified {
+		if !isSummary && (isClassified || hasExplicitTrack) {
 			filtered = append(filtered, e)
 		}
 	}
@@ -1071,6 +1080,7 @@ func getTrackEntriesByTime(ctx context.Context, client *redis.Client, track stri
 	for _, e := range entries {
 		isSummary := false
 		isClassified := false
+		hasExplicitTrack := false
 		for _, tag := range e.Tags {
 			if strings.HasPrefix(tag, "summary:") {
 				isSummary = true
@@ -1078,8 +1088,12 @@ func getTrackEntriesByTime(ctx context.Context, client *redis.Client, track stri
 			if tag == "classified" {
 				isClassified = true
 			}
+			if tag == "track:"+track || tag == "track_auto:"+track {
+				hasExplicitTrack = true
+			}
 		}
-		if !isSummary && isClassified {
+		// Include if: not a summary AND (classified OR has explicit track tag)
+		if !isSummary && (isClassified || hasExplicitTrack) {
 			result = append(result, e)
 		}
 	}

@@ -11,9 +11,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 	"github.com/ruthlesslypractical/hippocampus/internal/config"
+	"github.com/ruthlesslypractical/hippocampus/internal/logging"
 	"github.com/ruthlesslypractical/hippocampus/internal/memory"
 	"github.com/ruthlesslypractical/hippocampus/internal/util"
 	"github.com/ruthlesslypractical/hippocampus/pkg/ingest"
@@ -30,7 +33,6 @@ import (
 
 func main() {
 	configPath := flag.String("config", "", "path to config.json")
-	verbose := flag.Bool("v", false, "verbose logging")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -39,32 +41,33 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Find config
+	// Find config: flag > env > standard paths
 	path := *configPath
 	if path == "" {
-		home, _ := os.UserHomeDir()
-		candidates := []string{
-			home + "/Library/Application Support/Hippocampus/config.json",
-			home + "/.config/hippocampus/config.json",
-		}
-		for _, c := range candidates {
-			if _, err := os.Stat(c); err == nil {
-				path = c
-				break
-			}
-		}
-	}
-	if path == "" {
-		log.Fatal("no config file found")
+		path = config.FindConfigPath()
 	}
 
 	cfg, err := config.Load(path)
 	if err != nil {
-		log.Fatalf("loading config: %s", err)
+		fmt.Fprintf(os.Stderr, "Failed to load config from %s: %v\n", path, err)
+		os.Exit(1)
 	}
 
+	// Set up structured logging (writes to ~/Library/Logs/Hippocampus/slack.log or configured dir)
+	cleanupLog := logging.Setup(cfg, "slack")
+	defer cleanupLog()
+
+	slog.Info("slack bot starting",
+		"version", config.Version,
+		"config", path,
+	)
+
 	if cfg.Slack.BotToken == "" || cfg.Slack.AppToken == "" {
-		log.Fatal("slack.bot_token and slack.app_token are required in config")
+		slog.Error("missing required Slack tokens",
+			"bot_token_set", cfg.Slack.BotToken != "",
+			"app_token_set", cfg.Slack.AppToken != "",
+		)
+		os.Exit(1)
 	}
 
 	// Connect to Redis
@@ -75,12 +78,17 @@ func main() {
 	defer cancel()
 
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatalf("connecting to redis: %s", err)
+		slog.Error("redis connection failed", "error", err,
+			"addr", cfg.Redis.Addr,
+		)
+		os.Exit(1)
 	}
+	slog.Info("redis connected", "addr", cfg.Redis.Addr)
 
 	store, err := memory.NewRedisStore(cfg.Redis, nil)
 	if err != nil {
-		log.Fatalf("creating store: %s", err)
+		slog.Error("creating memory store", "error", err)
+		os.Exit(1)
 	}
 
 	// Build channel lookup set for filtering
@@ -90,7 +98,8 @@ func main() {
 	}
 
 	if len(monitoredChannels) == 0 {
-		log.Fatal("no channels configured in slack.channels")
+		slog.Error("no channels configured in slack.channels")
+		os.Exit(1)
 	}
 
 	// Create Slack client
@@ -100,14 +109,24 @@ func main() {
 	)
 
 	client := socketmode.New(api,
-		socketmode.OptionLog(log.New(os.Stderr, "[slack] ", log.LstdFlags)),
+		socketmode.OptionLog(log.New(os.Stderr, "[slack-socket] ", log.LstdFlags)),
 	)
 
-	if *verbose {
-		log.Printf("monitoring %d channels", len(monitoredChannels))
-		for _, ch := range cfg.Slack.Channels {
-			log.Printf("  %s (%s) [%s]", ch.Name, ch.ID, ch.Mode)
-		}
+	slog.Info("monitoring channels", "count", len(monitoredChannels))
+	for _, ch := range cfg.Slack.Channels {
+		slog.Info("channel configured",
+			"name", ch.Name,
+			"id", ch.ID,
+			"mode", ch.Mode,
+			"backfill", ch.Backfill,
+			"tags", ch.Tags,
+		)
+	}
+
+	// User name cache — resolves Slack user IDs to display names lazily
+	userNames := &userNameCache{
+		api:   api,
+		cache: make(map[string]string),
 	}
 
 	// Handle events
@@ -120,7 +139,7 @@ func main() {
 					continue
 				}
 				client.Ack(*evt.Request)
-				handleEvent(ctx, store, eventsAPIEvent, monitoredChannels, *verbose)
+				handleEvent(ctx, store, eventsAPIEvent, monitoredChannels, userNames)
 
 			case socketmode.EventTypeSlashCommand:
 				cmd, ok := evt.Data.(slack.SlashCommand)
@@ -130,13 +149,11 @@ func main() {
 				handleSlashCommand(ctx, store, cfg, client, evt, cmd)
 
 			case socketmode.EventTypeConnecting:
-				if *verbose {
-					log.Println("connecting to Slack...")
-				}
+				slog.Info("connecting to Slack...")
 			case socketmode.EventTypeConnected:
-				log.Println("connected to Slack (Socket Mode)")
+				slog.Info("connected to Slack (Socket Mode)")
 			case socketmode.EventTypeConnectionError:
-				log.Println("connection error, will retry...")
+				slog.Warn("Slack connection error, will retry")
 			}
 		}
 	}()
@@ -145,8 +162,8 @@ func main() {
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-		<-sig
-		log.Println("shutting down...")
+		s := <-sig
+		slog.Info("received signal, shutting down", "signal", s.String())
 		cancel()
 		os.Exit(0)
 	}()
@@ -154,16 +171,19 @@ func main() {
 	// Start backfill goroutines for channels that have it enabled
 	for _, ch := range cfg.Slack.Channels {
 		if ch.Backfill {
-			go runBackfill(ctx, rdb, store, slack.New(cfg.Slack.BotToken), ch, *verbose)
+			slog.Info("starting backfill", "channel", ch.Name, "id", ch.ID)
+			go runBackfill(ctx, rdb, store, slack.New(cfg.Slack.BotToken), ch, userNames)
 		}
 	}
 
+	slog.Info("entering Socket Mode event loop")
 	if err := client.Run(); err != nil {
-		log.Fatalf("socket mode error: %s", err)
+		slog.Error("socket mode fatal", "error", err)
+		os.Exit(1)
 	}
 }
 
-func handleEvent(ctx context.Context, store memory.Store, event slackevents.EventsAPIEvent, channels map[string]config.SlackChannel, verbose bool) {
+func handleEvent(ctx context.Context, store memory.Store, event slackevents.EventsAPIEvent, channels map[string]config.SlackChannel, users *userNameCache) {
 	switch event.Type {
 	case slackevents.CallbackEvent:
 		switch ev := event.InnerEvent.Data.(type) {
@@ -188,18 +208,26 @@ func handleEvent(ctx context.Context, store memory.Store, event slackevents.Even
 			if ev.SubType == "message_changed" && ev.Message != nil {
 				text = strings.TrimSpace(ev.Message.Text)
 				msgTs = ev.Message.Timestamp
+				slog.Debug("message edit detected",
+					"channel", ch.Name,
+					"ts", msgTs,
+				)
 			}
 
 			if text == "" {
 				return
 			}
-			if text == "" {
-				return
-			}
 
-			if verbose {
-				log.Printf("[%s] %s: %s", ch.Name, ev.User, util.Truncate(text, 80))
-			}
+			// Resolve user display name
+			userName := users.Resolve(ev.User)
+
+			slog.Debug("message received",
+				"channel", ch.Name,
+				"user", userName,
+				"user_id", ev.User,
+				"len", len(text),
+				"preview", util.Truncate(text, 80),
+			)
 
 			// Run safeguard scan
 			result := safeguard.Scan(text)
@@ -209,7 +237,9 @@ func handleEvent(ctx context.Context, store memory.Store, event slackevents.Even
 				"content:slack",
 				"source:slack",
 				fmt.Sprintf("slack:channel:%s", ev.Channel),
+				fmt.Sprintf("slack:channel_name:%s", ch.Name),
 				fmt.Sprintf("slack:user:%s", ev.User),
+				fmt.Sprintf("slack:user_name:%s", userName),
 				fmt.Sprintf("date:%s", time.Now().Format("2006-01-02")),
 			}
 
@@ -226,22 +256,35 @@ func handleEvent(ctx context.Context, store memory.Store, event slackevents.Even
 			// Add safety flag if risky
 			if result.RiskScore >= 0.5 {
 				tags = append(tags, "safety:flagged")
-				if verbose {
-					log.Printf("  ⚠️ risk_score=%.2f, flags=%d", result.RiskScore, len(result.Flags))
-				}
+				slog.Warn("message flagged by safeguard",
+					"channel", ch.Name,
+					"user", ev.User,
+					"risk_score", result.RiskScore,
+					"flags", len(result.Flags),
+				)
 			}
 
 			id := fmt.Sprintf("slack:%s:%s", ev.Channel, msgTs)
 
 			entry := memory.Entry{
 				ID:        id,
-				Timestamp: time.Now(),
+				Timestamp: parseSlackTimestamp(msgTs),
 				Content:   text,
 				Tags:      tags,
 			}
 
 			if err := store.Put(ctx, entry); err != nil {
-				log.Printf("error storing message: %s", err)
+				slog.Error("failed to store message",
+					"channel", ch.Name,
+					"id", id,
+					"error", err,
+				)
+			} else {
+				slog.Info("archived message",
+					"channel", ch.Name,
+					"id", id,
+					"tags", len(tags),
+				)
 			}
 		}
 	}
@@ -492,21 +535,89 @@ func handleSlashCommand(ctx context.Context, store memory.Store, cfg config.Conf
 
 
 
+// userNameCache lazily resolves Slack user IDs to display names.
+type userNameCache struct {
+	api   *slack.Client
+	cache map[string]string
+	mu    sync.RWMutex
+}
+
+// parseSlackTimestamp converts a Slack message timestamp (e.g. "1749792296.077709")
+// to a time.Time. Falls back to time.Now() on parse failure.
+func parseSlackTimestamp(ts string) time.Time {
+	if ts == "" {
+		return time.Now()
+	}
+	// Slack ts format: "seconds.microseconds" (dot-separated)
+	parts := strings.SplitN(ts, ".", 2)
+	var sec, usec int64
+	fmt.Sscanf(parts[0], "%d", &sec)
+	if len(parts) > 1 {
+		fmt.Sscanf(parts[1], "%d", &usec)
+	}
+	if sec == 0 {
+		return time.Now()
+	}
+	return time.Unix(sec, usec*1000) // microseconds → nanoseconds
+}
+
+// Resolve returns the display name for a Slack user ID.
+// Falls back to the raw ID if the API call fails.
+func (c *userNameCache) Resolve(userID string) string {
+	if userID == "" {
+		return ""
+	}
+
+	c.mu.RLock()
+	if name, ok := c.cache[userID]; ok {
+		c.mu.RUnlock()
+		return name
+	}
+	c.mu.RUnlock()
+
+	// Cache miss — call API
+	user, err := c.api.GetUserInfo(userID)
+	if err != nil {
+		slog.Debug("failed to resolve user name", "user_id", userID, "error", err)
+		return userID // fall back to raw ID
+	}
+
+	name := user.RealName
+	if name == "" {
+		name = user.Name // username fallback
+	}
+
+	c.mu.Lock()
+	c.cache[userID] = name
+	c.mu.Unlock()
+
+	return name
+}
+
 // runBackfill incrementally pages through channel history, storing messages
 // and tracking progress via a Redis cursor key. Resumes from where it left off.
-func runBackfill(ctx context.Context, rdb *redis.Client, store memory.Store, api *slack.Client, ch config.SlackChannel, verbose bool) {
+func runBackfill(ctx context.Context, rdb *redis.Client, store memory.Store, api *slack.Client, ch config.SlackChannel, users *userNameCache) {
 	cursorKey := fmt.Sprintf("meta:slack:backfill:%s", ch.ID)
 
 	// Read our progress cursor (oldest timestamp we've reached)
 	latestProcessed, _ := rdb.Get(ctx, cursorKey).Result()
 
-	if verbose {
-		log.Printf("[backfill] %s: starting (cursor: %s)", ch.Name, latestProcessed)
+	// "done" sentinel means backfill previously completed — do an opportunistic tag-patch pass
+	if latestProcessed == "done" {
+		slog.Info("backfill complete, running tag-patch pass", "channel", ch.Name)
+		patchExistingTags(ctx, rdb, store, api, ch, users)
+		return
 	}
+
+	slog.Info("backfill starting",
+		"channel", ch.Name,
+		"cursor", latestProcessed,
+	)
 
 	for {
 		select {
 		case <-ctx.Done():
+			slog.Info("backfill cancelled", "channel", ch.Name)
 			return
 		default:
 		}
@@ -522,23 +633,22 @@ func runBackfill(ctx context.Context, rdb *redis.Client, store memory.Store, api
 
 		history, err := api.GetConversationHistory(params)
 		if err != nil {
-			if verbose {
-				log.Printf("[backfill] %s: error: %s (will retry in 60s)", ch.Name, err)
-			}
+			slog.Warn("backfill API error, will retry",
+				"channel", ch.Name,
+				"error", err,
+			)
 			time.Sleep(60 * time.Second)
 			continue
 		}
 
 		if len(history.Messages) == 0 {
-			if verbose {
-				log.Printf("[backfill] %s: complete (reached beginning)", ch.Name)
-			}
-			// Mark as done — store a sentinel
+			slog.Info("backfill complete (reached beginning)", "channel", ch.Name)
 			rdb.Set(ctx, cursorKey, "done", 0)
 			return
 		}
 
 		count := 0
+		patched := 0
 		var oldestTs string
 		for _, msg := range history.Messages {
 			// Track oldest for cursor
@@ -548,12 +658,17 @@ func runBackfill(ctx context.Context, rdb *redis.Client, store memory.Store, api
 				continue
 			}
 
+			// Resolve user name
+			userName := users.Resolve(msg.User)
+
 			// Build tags
 			tags := []string{
 				"content:slack",
 				"source:slack",
 				fmt.Sprintf("slack:channel:%s", ch.ID),
+				fmt.Sprintf("slack:channel_name:%s", ch.Name),
 				fmt.Sprintf("slack:user:%s", msg.User),
+				fmt.Sprintf("slack:user_name:%s", userName),
 			}
 			if len(ch.Tags) > 0 {
 				tags = append(tags, ch.Tags...)
@@ -564,9 +679,36 @@ func runBackfill(ctx context.Context, rdb *redis.Client, store memory.Store, api
 
 			id := fmt.Sprintf("slack:%s:%s", ch.ID, msg.Timestamp)
 
+			// Check if entry already exists — if so, opportunistically patch tags
+			existing, err := store.Get(ctx, id)
+			if err == nil && existing.ID != "" {
+				// Entry exists — check if it's missing the human-readable tags
+				needsPatch := true
+				for _, t := range existing.Tags {
+					if strings.HasPrefix(t, "slack:user_name:") {
+						needsPatch = false
+						break
+					}
+				}
+				if needsPatch {
+					// Add the human-readable tags to existing entry
+					patchTags := []string{
+						fmt.Sprintf("slack:channel_name:%s", ch.Name),
+						fmt.Sprintf("slack:user_name:%s", userName),
+					}
+					for _, pt := range patchTags {
+						existing.Tags = append(existing.Tags, pt)
+					}
+					existing.Tags = dedup(existing.Tags)
+					store.Put(ctx, existing)
+					patched++
+				}
+				continue // don't re-store content
+			}
+
 			entry := memory.Entry{
 				ID:        id,
-				Timestamp: time.Now(),
+				Timestamp: parseSlackTimestamp(msg.Timestamp),
 				Content:   msg.Text,
 				Tags:      tags,
 			}
@@ -590,14 +732,15 @@ func runBackfill(ctx context.Context, rdb *redis.Client, store memory.Store, api
 			latestProcessed = oldestTs
 		}
 
-		if verbose {
-			log.Printf("[backfill] %s: ingested %d messages (cursor now: %s)", ch.Name, count, oldestTs)
-		}
+		slog.Info("backfill page ingested",
+			"channel", ch.Name,
+			"new", count,
+			"patched", patched,
+			"cursor", oldestTs,
+		)
 
 		if !history.HasMore {
-			if verbose {
-				log.Printf("[backfill] %s: complete", ch.Name)
-			}
+			slog.Info("backfill complete", "channel", ch.Name)
 			rdb.Set(ctx, cursorKey, "done", 0)
 			return
 		}
@@ -605,4 +748,100 @@ func runBackfill(ctx context.Context, rdb *redis.Client, store memory.Store, api
 		// Rate limit: ~1 page per 2 seconds (Tier 3)
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// patchExistingTags scans entries for a channel and rewrites human-readable tags
+// (user_name, channel_name) on all entries, re-resolving names from the API.
+func patchExistingTags(ctx context.Context, rdb *redis.Client, store memory.Store, api *slack.Client, ch config.SlackChannel, users *userNameCache) {
+	// Find all entries for this channel via the tag set
+	tagKey := fmt.Sprintf("tag:slack:channel:%s", ch.ID)
+	ids, err := rdb.SMembers(ctx, tagKey).Result()
+	if err != nil || len(ids) == 0 {
+		slog.Info("tag-patch: no entries found for channel", "channel", ch.Name)
+		return
+	}
+
+	patched := 0
+	scanned := 0
+	for _, id := range ids {
+		select {
+		case <-ctx.Done():
+			slog.Info("tag-patch cancelled", "channel", ch.Name, "patched", patched)
+			return
+		default:
+		}
+
+		entry, err := store.Get(ctx, id)
+		if err != nil || entry.ID == "" {
+			continue
+		}
+		scanned++
+
+		if scanned <= 3 {
+			slog.Debug("tag-patch sample entry",
+				"id", entry.ID,
+				"tags_before", strings.Join(entry.Tags, ", "),
+			)
+		}
+
+		// Find the user ID and strip any existing user_name/channel_name tags
+		var userID string
+		filtered := make([]string, 0, len(entry.Tags))
+		for _, t := range entry.Tags {
+			if strings.HasPrefix(t, "slack:user_name:") {
+				continue // strip — will re-add
+			}
+			if strings.HasPrefix(t, "slack:channel_name:") {
+				continue // strip — will re-add
+			}
+			if strings.HasPrefix(t, "slack:user:") {
+				userID = strings.TrimPrefix(t, "slack:user:")
+			}
+			filtered = append(filtered, t)
+		}
+
+		// Re-add with current resolved values
+		filtered = append(filtered, fmt.Sprintf("slack:channel_name:%s", ch.Name))
+		if userID != "" {
+			userName := users.Resolve(userID)
+			filtered = append(filtered, fmt.Sprintf("slack:user_name:%s", userName))
+		}
+
+		entry.Tags = dedup(filtered)
+
+		// Fix timestamp: extract from entry ID (slack:<channel>:<ts>) if current ts looks wrong
+		// "Wrong" = within a few seconds of another entry (batch-ingested) or clearly not the message time
+		parts := strings.SplitN(entry.ID, ":", 3)
+		if len(parts) == 3 {
+			slackTs := parts[2]
+			correctTime := parseSlackTimestamp(slackTs)
+			if !correctTime.IsZero() && correctTime.Year() > 2000 {
+				entry.Timestamp = correctTime
+			}
+		}
+
+		if err := store.Put(ctx, entry); err != nil {
+			continue
+		}
+		patched++
+	}
+
+	slog.Info("tag-patch complete",
+		"channel", ch.Name,
+		"scanned", scanned,
+		"patched", patched,
+	)
+}
+
+// dedup removes duplicate strings from a slice, preserving order.
+func dedup(ss []string) []string {
+	seen := make(map[string]bool, len(ss))
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }

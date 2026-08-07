@@ -202,6 +202,8 @@ func (s *Server) dispatchTool(ctx context.Context, params CallToolParams) (CallT
 		return s.toolSummaryTree(ctx, params.Arguments)
 	case "memory_summary_leaves":
 		return s.toolSummaryLeaves(ctx, params.Arguments)
+	case "memory_session_context":
+		return s.toolSessionContext(ctx, params.Arguments)
 	default:
 		return CallToolResult{}, fmt.Errorf("unknown tool: %s", params.Name)
 	}
@@ -256,10 +258,44 @@ func (s *Server) toolSearch(ctx context.Context, args map[string]interface{}) (C
 		limit = int(l)
 	}
 
-	results, err := s.store.Search(ctx, query, limit)
+	// Check for advanced options
+	sortBy, _ := args["sort_by"].(string)
+	var filterTags []string
+	if t, ok := args["filter_tags"].([]interface{}); ok {
+		for _, v := range t {
+			if s, ok := v.(string); ok {
+				filterTags = append(filterTags, s)
+			}
+		}
+	}
+	var after, before int64
+	if a, ok := args["after"].(float64); ok {
+		after = int64(a)
+	}
+	if b, ok := args["before"].(float64); ok {
+		before = int64(b)
+	}
+
+	// If any advanced options are set, use SearchWithOptions
+	var results []memory.SearchResult
+	var err error
+	if sortBy != "" || len(filterTags) > 0 || after > 0 || before > 0 {
+		opts := memory.SearchOptions{
+			SortBy:     sortBy,
+			FilterTags: filterTags,
+			After:      after,
+			Before:     before,
+		}
+		results, err = s.store.SearchWithOptions(ctx, query, limit, opts)
+	} else {
+		results, err = s.store.Search(ctx, query, limit)
+	}
 	if err != nil {
 		return CallToolResult{}, err
 	}
+
+	// Verify integrity of all returned entries
+	s.store.VerifySearchResults(ctx, results)
 
 	data, _ := json.MarshalIndent(results, "", "  ")
 	return CallToolResult{
@@ -305,6 +341,9 @@ func (s *Server) toolByTags(ctx context.Context, args map[string]interface{}) (C
 	if err != nil {
 		return CallToolResult{}, err
 	}
+
+	// Verify integrity of all returned entries
+	s.store.VerifyEntries(ctx, entries)
 
 	data, _ := json.MarshalIndent(entries, "", "  ")
 	return CallToolResult{
@@ -386,6 +425,9 @@ func (s *Server) toolGet(ctx context.Context, args map[string]interface{}) (Call
 		return CallToolResult{}, err
 	}
 
+	// Verify integrity
+	s.store.VerifyEntry(ctx, &entry)
+
 	data, _ := json.MarshalIndent(entry, "", "  ")
 	return CallToolResult{
 		Content: []ContentBlock{{Type: "text", Text: string(data)}},
@@ -433,6 +475,9 @@ func (s *Server) toolTimeRange(ctx context.Context, args map[string]interface{})
 		return CallToolResult{}, err
 	}
 
+	// Verify integrity of all returned entries
+	s.store.VerifyEntries(ctx, entries)
+
 	data, _ := json.MarshalIndent(entries, "", "  ")
 	return CallToolResult{
 		Content: []ContentBlock{{Type: "text", Text: string(data)}},
@@ -449,6 +494,39 @@ func (s *Server) toolRecent(ctx context.Context, args map[string]interface{}) (C
 	if err != nil {
 		return CallToolResult{}, err
 	}
+
+	// Verify integrity of all returned entries
+	s.store.VerifyEntries(ctx, entries)
+
+	data, _ := json.MarshalIndent(entries, "", "  ")
+	return CallToolResult{
+		Content: []ContentBlock{{Type: "text", Text: string(data)}},
+	}, nil
+}
+
+func (s *Server) toolSessionContext(ctx context.Context, args map[string]interface{}) (CallToolResult, error) {
+	id, _ := args["id"].(string)
+	if id == "" {
+		return CallToolResult{}, fmt.Errorf("id is required")
+	}
+
+	before := 5
+	if b, ok := args["before"].(float64); ok && b >= 0 {
+		before = int(b)
+	}
+
+	after := 5
+	if a, ok := args["after"].(float64); ok && a >= 0 {
+		after = int(a)
+	}
+
+	entries, err := s.store.SessionContext(ctx, id, before, after)
+	if err != nil {
+		return CallToolResult{}, err
+	}
+
+	// Verify integrity of all returned entries
+	s.store.VerifyEntries(ctx, entries)
 
 	data, _ := json.MarshalIndent(entries, "", "  ")
 	return CallToolResult{

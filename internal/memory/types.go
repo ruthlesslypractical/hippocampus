@@ -17,7 +17,8 @@ type Entry struct {
 	Timestamp time.Time `json:"timestamp"`
 	Content   string    `json:"content"`
 	Tags      []string  `json:"tags"`
-	Weight    float64   `json:"weight,omitempty"` // Confidence weight: 0.0-1.0
+	Weight    float64   `json:"weight,omitempty"`    // Confidence weight: 0.0-1.0
+	Integrity string   `json:"integrity,omitempty"` // "verified", "unattested", or "FAILED"
 }
 
 // SearchResult wraps an entry with a relevance score.
@@ -39,6 +40,14 @@ type Link struct {
 	TargetID     string  `json:"target_id"`
 	Score        float64 `json:"score"`
 	RelationType string  `json:"relation_type,omitempty"` // supports, contradicts, extends, preceded_by, or empty
+}
+
+// SearchOptions configures advanced search behavior.
+type SearchOptions struct {
+	SortBy     string   // "relevance" (default), "timestamp_asc", "timestamp_desc"
+	FilterTags []string // Only return entries matching ALL of these tags
+	After      int64    // Only entries after this unix timestamp (0 = no lower bound)
+	Before     int64    // Only entries before this unix timestamp (0 = no upper bound)
 }
 
 // DefaultWeightForTags returns a confidence weight based on tag patterns.

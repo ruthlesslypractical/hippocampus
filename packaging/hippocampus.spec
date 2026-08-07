@@ -1,5 +1,5 @@
 %global goipath github.com/ruthlesslypractical/hippocampus
-%global version 2.0.0
+%global version 2.0.2
 %global release 1%{?dist}
 
 Name:           hippocampus
@@ -47,6 +47,7 @@ go build ${GOFLAGS} -ldflags "${LDFLAGS}" -o bin/hippocampus-hook ./cmd/hook/
 go build ${GOFLAGS} -ldflags "${LDFLAGS}" -o bin/hippocampus-daemon ./cmd/daemon/
 go build ${GOFLAGS} -ldflags "${LDFLAGS}" -o bin/hippocampus-summarize ./cmd/summarize/
 go build ${GOFLAGS} -ldflags "${LDFLAGS}" -o bin/hippocampus-slack ./cmd/slack/
+go build ${GOFLAGS} -ldflags "${LDFLAGS}" -o bin/hippocampus-admin ./cmd/admin/
 
 %install
 install -d %{buildroot}%{_bindir}
@@ -60,6 +61,7 @@ install -m 755 bin/hippocampus-hook %{buildroot}%{_bindir}/
 install -m 755 bin/hippocampus-daemon %{buildroot}%{_bindir}/
 install -m 755 bin/hippocampus-summarize %{buildroot}%{_bindir}/
 install -m 755 bin/hippocampus-slack %{buildroot}%{_bindir}/
+install -m 755 bin/hippocampus-admin %{buildroot}%{_bindir}/
 
 # Config
 install -m 644 docs/config-reference.json %{buildroot}%{_sysconfdir}/hippocampus/config.json
@@ -78,6 +80,25 @@ Environment=HIPPOCAMPUS_CONFIG=%{_sysconfdir}/hippocampus/config.json
 Restart=on-failure
 RestartSec=5
 Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > %{buildroot}%{_unitdir}/hippocampus-slack.service << 'EOF'
+[Unit]
+Description=Hippocampus Slack Channel Archival Bot
+After=network.target redis.service hippocampus-daemon.service
+Wants=redis.service
+
+[Service]
+Type=simple
+ExecStart=%{_bindir}/hippocampus-slack
+Environment=HIPPOCAMPUS_CONFIG=%{_sysconfdir}/hippocampus/config.json
+Restart=on-failure
+RestartSec=10
+Nice=12
 IOSchedulingClass=idle
 
 [Install]
@@ -114,31 +135,56 @@ EOF
 install -m 644 README.md %{buildroot}%{_docdir}/%{name}/ 2>/dev/null || true
 install -m 644 docs/config-reference.json %{buildroot}%{_docdir}/%{name}/
 
+# Cron (alternative to systemd timer)
+install -d %{buildroot}%{_sysconfdir}/cron.d
+cat > %{buildroot}%{_sysconfdir}/cron.d/hippocampus << 'EOF'
+# Hippocampus fractal summarization — runs every 3 hours
+# Uncomment to use cron instead of hippocampus-summarize.timer
+#0 */3 * * * root HIPPOCAMPUS_CONFIG=/etc/hippocampus/config.json /usr/bin/hippocampus-summarize --3h >> /var/log/hippocampus/summarize.log 2>&1
+
+# Daily full summary rollup (4:15 AM)
+#15 4 * * * root HIPPOCAMPUS_CONFIG=/etc/hippocampus/config.json /usr/bin/hippocampus-summarize --daily >> /var/log/hippocampus/summarize.log 2>&1
+
+# Weekly summary (Sunday 5:00 AM)
+#0 5 * * 0 root HIPPOCAMPUS_CONFIG=/etc/hippocampus/config.json /usr/bin/hippocampus-summarize --weekly >> /var/log/hippocampus/summarize.log 2>&1
+EOF
+
 %files
 %{_bindir}/hippocampus-mcp
 %{_bindir}/hippocampus-hook
 %{_bindir}/hippocampus-daemon
 %{_bindir}/hippocampus-summarize
 %{_bindir}/hippocampus-slack
+%{_bindir}/hippocampus-admin
 %config(noreplace) %{_sysconfdir}/hippocampus/config.json
+%config(noreplace) %{_sysconfdir}/cron.d/hippocampus
 %{_unitdir}/hippocampus-daemon.service
+%{_unitdir}/hippocampus-slack.service
 %{_unitdir}/hippocampus-summarize.timer
 %{_unitdir}/hippocampus-summarize.service
 %{_docdir}/%{name}/
 
 %post
 %systemd_post hippocampus-daemon.service
+%systemd_post hippocampus-slack.service
 %systemd_post hippocampus-summarize.timer
 
 %preun
 %systemd_preun hippocampus-daemon.service
+%systemd_preun hippocampus-slack.service
 %systemd_preun hippocampus-summarize.timer
 
 %postun
 %systemd_postun_with_restart hippocampus-daemon.service
+%systemd_postun_with_restart hippocampus-slack.service
 %systemd_postun hippocampus-summarize.timer
 
 %changelog
+* Tue Jul 29 2026 Theron Bair <tbair@ruthlesslypractical.com> - 2.0.2-1
+- Add hippocampus-slack.service systemd unit (was missing from packaging)
+- Add hippocampus-admin to RPM (was missing from packaging)
+- Several other fixes that are too shameful to mention
+
 * Fri Jul 25 2026 Theron Bair <tbair@ruthlesslypractical.com> - 2.0.0-1
 - Recall v2: tiered injection (full/summary/breadcrumb), track weighting, relevance floor
 - Track orientation system with auto-injection on track shift

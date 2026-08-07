@@ -46,6 +46,24 @@ func toolDefinitions() []Tool {
 						"type":        "number",
 						"description": "Max results to return. Default 10.",
 					},
+					"sort_by": map[string]interface{}{
+						"type":        "string",
+						"description": "Sort order for results. 'relevance' (default) ranks by search score. 'timestamp_asc' returns oldest first (use with limit:1 for 'first mention of X'). 'timestamp_desc' returns newest first.",
+						"enum":        []string{"relevance", "timestamp_asc", "timestamp_desc"},
+					},
+					"filter_tags": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Optional tag filter. Only entries matching ALL specified tags are returned. Tags are matched exactly (e.g., 'kind:user_prompt', 'track:VBrain').",
+					},
+					"after": map[string]interface{}{
+						"type":        "number",
+						"description": "Only return entries with timestamp after this value (Unix seconds). Useful for 'first mention since date X'.",
+					},
+					"before": map[string]interface{}{
+						"type":        "number",
+						"description": "Only return entries with timestamp before this value (Unix seconds). Useful for 'mentions before date X'.",
+					},
 				},
 				"required": []string{"query"},
 			}),
@@ -409,6 +427,28 @@ func toolDefinitions() []Tool {
 						"description": "If true, return proposed reclassifications without applying them.",
 					},
 				},
+			}),
+		},
+		{
+			Name:        "memory_session_context",
+			Description: "Retrieve entries surrounding a given entry within the same session, in chronological order. Use to see what came before/after a specific entry in the conversation flow. Returns up to `before` entries before the target and `after` entries after it, plus the target itself.",
+			InputSchema: mustJSON(map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Entry ID to get context around.",
+					},
+					"before": map[string]interface{}{
+						"type":        "number",
+						"description": "Number of entries before the target to return. Default 5.",
+					},
+					"after": map[string]interface{}{
+						"type":        "number",
+						"description": "Number of entries after the target to return. Default 5.",
+					},
+				},
+				"required": []string{"id"},
 			}),
 		},
 		{

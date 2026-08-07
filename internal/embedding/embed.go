@@ -6,10 +6,14 @@ package embedding
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -30,11 +34,34 @@ func NewEmbedder(cfg config.OllamaConfig) *Embedder {
 	if cfg.EmbeddingModel == "" {
 		return nil
 	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// Wire up TLS CA if configured
+	if cfg.CACertPath != "" || cfg.TLSInsecure {
+		tlsCfg := &tls.Config{}
+		if cfg.TLSInsecure {
+			tlsCfg.InsecureSkipVerify = true
+		}
+		if cfg.CACertPath != "" {
+			caCert, err := os.ReadFile(cfg.CACertPath)
+			if err == nil {
+				pool := x509.NewCertPool()
+				if pool.AppendCertsFromPEM(caCert) {
+					tlsCfg.RootCAs = pool
+				}
+			} else {
+				slog.Warn("embedder: failed to read CA cert", "path", cfg.CACertPath, "error", err)
+			}
+		}
+		client.Transport = &http.Transport{TLSClientConfig: tlsCfg}
+	}
+
 	return &Embedder{
 		baseURL: strings.TrimRight(cfg.BaseURL, "/"),
 		model:   cfg.EmbeddingModel,
 		dims:    cfg.EmbeddingDimensions,
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  client,
 	}
 }
 

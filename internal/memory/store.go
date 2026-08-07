@@ -23,6 +23,12 @@ type Store interface {
 	// Falls back to naive substring scan if RediSearch is not available.
 	Search(ctx context.Context, query string, limit int) ([]SearchResult, error)
 
+	// SearchWithOptions performs full-text search with sort, tag filter, and time bounds.
+	// When SortBy is "timestamp_asc" or "timestamp_desc", results are ordered chronologically
+	// instead of by relevance. FilterTags restricts to entries matching all specified tags.
+	// After/Before constrain the timestamp range.
+	SearchWithOptions(ctx context.Context, query string, limit int, opts SearchOptions) ([]SearchResult, error)
+
 	// ByTags returns entries that have ALL of the specified tags.
 	ByTags(ctx context.Context, tags []string, limit int, offset int) ([]Entry, error)
 
@@ -62,6 +68,21 @@ type Store interface {
 	// Recent returns the N most recent entries from the timeline (newest first).
 	// No timestamp math required — just tail the timeline ZSET.
 	Recent(ctx context.Context, limit int) ([]Entry, error)
+
+	// SessionContext returns entries surrounding a given entry within the same session.
+	// Returns up to `before` entries before and `after` entries after the target,
+	// plus the target itself, all in chronological order.
+	SessionContext(ctx context.Context, id string, before, after int) ([]Entry, error)
+
+	// VerifyEntry checks the integrity of a single entry by comparing its stored
+	// content_hash against a freshly computed hash. Populates entry.Integrity.
+	VerifyEntry(ctx context.Context, entry *Entry)
+
+	// VerifyEntries checks integrity for a slice of entries.
+	VerifyEntries(ctx context.Context, entries []Entry)
+
+	// VerifySearchResults checks integrity for search results.
+	VerifySearchResults(ctx context.Context, results []SearchResult)
 
 	// Close releases resources.
 	Close() error

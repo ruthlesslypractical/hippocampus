@@ -9,11 +9,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -26,6 +29,9 @@ type Client struct {
 	// WedgeTimeout is how long to wait for a new token before declaring the model wedged.
 	// If zero, defaults to 90 seconds.
 	WedgeTimeout time.Duration
+	// HTTPClient allows custom TLS configuration (e.g. private CA).
+	// If nil, http.DefaultClient is used.
+	HTTPClient *http.Client
 }
 
 // GenerateOptions holds optional parameters for Generate calls.
@@ -85,6 +91,54 @@ func New(baseURL, model string, timeoutMinutes int) *Client {
 	}
 }
 
+// NewFromConfig creates an Ollama client using baseURL/model with TLS from OllamaConfig.
+// Use this when the Ollama endpoint may be behind a TLS proxy with a private CA.
+func NewFromConfig(baseURL, model string, caCertPath string, insecure bool, timeoutMinutes int) *Client {
+	if caCertPath != "" || insecure {
+		return NewWithTLS(baseURL, model, timeoutMinutes, caCertPath, insecure)
+	}
+	return New(baseURL, model, timeoutMinutes)
+}
+
+// NewWithTLS creates an Ollama client with custom CA certificate support.
+// If caCertPath is empty and insecure is false, behaves like New().
+func NewWithTLS(baseURL, model string, timeoutMinutes int, caCertPath string, insecure bool) *Client {
+	c := New(baseURL, model, timeoutMinutes)
+
+	if caCertPath == "" && !insecure {
+		return c
+	}
+
+	tlsCfg := &tls.Config{}
+
+	if insecure {
+		tlsCfg.InsecureSkipVerify = true
+		slog.Warn("ollama TLS verification disabled (tls_insecure=true)")
+	}
+
+	if caCertPath != "" {
+		caCert, err := os.ReadFile(caCertPath)
+		if err != nil {
+			slog.Error("failed to read CA cert for Ollama", "path", caCertPath, "error", err)
+			return c // fall back to system roots
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCert) {
+			slog.Error("failed to parse CA cert PEM", "path", caCertPath)
+			return c
+		}
+		tlsCfg.RootCAs = pool
+		slog.Info("ollama using custom CA", "path", caCertPath)
+	}
+
+	c.HTTPClient = &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: tlsCfg,
+		},
+	}
+	return c
+}
+
 // Generate sends a prompt to Ollama and returns the response text.
 // It uses streaming mode with wedge detection.
 func (c *Client) Generate(ctx context.Context, prompt string) (string, error) {
@@ -120,7 +174,10 @@ func (c *Client) GenerateWithOptions(ctx context.Context, prompt, model string, 
 
 	// No overall timeout — wedge detection (per-token timeout) and context cancellation
 	// handle liveness. An HTTP-level timeout kills long-but-healthy generations on large windows.
-	httpClient := &http.Client{}
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("calling Ollama: %w", err)

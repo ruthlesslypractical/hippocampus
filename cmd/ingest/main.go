@@ -2,22 +2,26 @@
 // Use of this source code is governed by a BSD-3-Clause license
 // that can be found in the LICENSE file.
 
-// hippocampus-ingest is a CLI tool for ingesting web pages into Hippocampus memory.
+// hippocampus-ingest ingests content into Hippocampus memory.
 //
-// Usage:
+// Modes:
+//   - URL mode (default): hippocampus-ingest <url> [--tags ...] [--title ...]
+//   - Session mode: hippocampus-ingest --session <path> [--tags ...] [--track ...]
 //
-//	hippocampus-ingest <url> [--tags tag1,tag2,...] [--title "Custom Title"]
-//
-// It fetches the URL, extracts readable content, scans for prompt injection,
-// chunks if needed, and stores in the two-stage model (stub + content entries).
+// Session mode reads Kiro .jsonl session files and stores each prompt/response
+// as a memory entry with appropriate tags and timestamps.
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ruthlesslypractical/hippocampus/internal/config"
 	"github.com/ruthlesslypractical/hippocampus/internal/memory"
@@ -26,26 +30,23 @@ import (
 
 func main() {
 	var (
-		tagsStr  string
-		title    string
-		verbose  bool
-		dryRun   bool
-		maxChunk int
+		tagsStr     string
+		title       string
+		verbose     bool
+		dryRun      bool
+		maxChunk    int
+		sessionPath string
+		track       string
 	)
 
-	flag.StringVar(&tagsStr, "tags", "", "Comma-separated tags to apply (in addition to automatic source:web, url:*, domain:* tags)")
-	flag.StringVar(&title, "title", "", "Override extracted title")
+	flag.StringVar(&tagsStr, "tags", "", "Comma-separated tags to apply")
+	flag.StringVar(&title, "title", "", "Override extracted title (URL mode only)")
 	flag.BoolVar(&verbose, "v", false, "Verbose output")
-	flag.BoolVar(&dryRun, "dry-run", false, "Extract and scan but don't store (useful for testing)")
-	flag.IntVar(&maxChunk, "max-chunk", 3000, "Maximum chunk size in characters")
+	flag.BoolVar(&dryRun, "dry-run", false, "Show what would be ingested without writing")
+	flag.IntVar(&maxChunk, "max-chunk", 3000, "Maximum chunk size in characters (URL mode only)")
+	flag.StringVar(&sessionPath, "session", "", "Path to .jsonl session file or directory of session files")
+	flag.StringVar(&track, "track", "", "Track tag to apply to all ingested entries (session mode)")
 	flag.Parse()
-
-	if flag.NArg() < 1 {
-		fmt.Fprintf(os.Stderr, "hippocampus-ingest v%s\n\nUsage: hippocampus-ingest <url> [--tags tag1,tag2] [--title \"Title\"] [--dry-run] [-v]\n", config.Version)
-		os.Exit(1)
-	}
-
-	rawURL := flag.Arg(0)
 
 	// Parse tags
 	var tags []string
@@ -67,7 +68,7 @@ func main() {
 	}
 
 	// Connect to Redis
-	store, err := memory.NewRedisStore(cfg.Redis, nil) // No embedder needed for ingest
+	store, err := memory.NewRedisStore(cfg.Redis, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to Redis: %v\n", err)
 		os.Exit(1)
@@ -76,39 +77,52 @@ func main() {
 
 	ctx := context.Background()
 
-	// Configure options
-	opts := ingest.DefaultOptions()
-	opts.Tags = tags
-	opts.ChunkOpts.MaxChunkSize = maxChunk
+	// Dispatch by mode
+	if sessionPath != "" {
+		// Session JSONL mode
+		runSessionIngest(ctx, store, sessionPath, track, tags, verbose, dryRun)
+	} else {
+		// URL mode (original behavior)
+		if flag.NArg() < 1 {
+			fmt.Fprintf(os.Stderr, "hippocampus-ingest v%s\n\n", config.Version)
+			fmt.Fprintf(os.Stderr, "Usage:\n")
+			fmt.Fprintf(os.Stderr, "  URL mode:     hippocampus-ingest <url> [--tags tag1,tag2] [--title \"Title\"] [--dry-run] [-v]\n")
+			fmt.Fprintf(os.Stderr, "  Session mode: hippocampus-ingest --session <path.jsonl|dir> [--tags tag1,tag2] [--track Name] [--dry-run] [-v]\n")
+			os.Exit(1)
+		}
+		runURLIngest(ctx, store, flag.Arg(0), tags, title, verbose, dryRun, maxChunk, cfg)
+	}
+}
 
+// ───────────────────────────────────────────────────────────────────
+// URL Ingest (original behavior)
+// ───────────────────────────────────────────────────────────────────
+
+func runURLIngest(ctx context.Context, store *memory.RedisStore, rawURL string, tags []string, title string, verbose, dryRun bool, maxChunk int, cfg config.Config) {
 	if verbose {
 		fmt.Printf("Ingesting: %s\n", rawURL)
 		fmt.Printf("Tags: %v\n", tags)
 	}
 
 	if dryRun {
-		fmt.Printf("DRY RUN — extracting and scanning only, not storing\n\n")
-		// For dry run, we'd need to split the pipeline. For now, just run it fully
-		// but print what would happen. TODO: expose extract+scan as separate step.
-		fmt.Printf("(Full dry-run mode not yet implemented — use -v for verbose output)\n")
+		fmt.Printf("DRY RUN — extracting and scanning only, not storing\n")
 		os.Exit(0)
 	}
 
-	// Run the pipeline
+	opts := ingest.DefaultOptions()
+	opts.Tags = tags
+	opts.ChunkOpts.MaxChunkSize = maxChunk
+
 	result, err := ingest.Pipeline(ctx, store, rawURL, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Ingestion failed: %v\n", err)
 		if result != nil && result.SafetyResult.RiskScore > 0 {
 			fmt.Fprintf(os.Stderr, "Safety scan: risk_score=%.2f, %d flags\n",
 				result.SafetyResult.RiskScore, len(result.SafetyResult.Flags))
-			for _, f := range result.SafetyResult.Flags {
-				fmt.Fprintf(os.Stderr, "  [%s] %s (offset %d)\n", f.Severity, f.Description, f.Offset)
-			}
 		}
 		os.Exit(1)
 	}
 
-	// Output
 	fmt.Printf("✓ Ingested: \"%s\"\n", result.Title)
 	fmt.Printf("  URL:        %s\n", result.URL)
 	fmt.Printf("  Words:      %d\n", result.WordCount)
@@ -125,19 +139,216 @@ func main() {
 	if result.SafetyResult.RiskScore > 0 {
 		fmt.Printf("  Safety:     risk_score=%.2f (%d flags)\n",
 			result.SafetyResult.RiskScore, len(result.SafetyResult.Flags))
-		if verbose {
-			for _, f := range result.SafetyResult.Flags {
-				fmt.Printf("    [%s] %s (offset %d)\n", f.Severity, f.Description, f.Offset)
-			}
-		}
 	} else {
 		fmt.Printf("  Safety:     clean ✓\n")
 	}
+}
 
-	if len(result.Warnings) > 0 {
-		fmt.Printf("  Warnings:\n")
-		for _, w := range result.Warnings {
-			fmt.Printf("    - %s\n", w)
+// ───────────────────────────────────────────────────────────────────
+// Session JSONL Ingest
+// ───────────────────────────────────────────────────────────────────
+
+// sessionLogEntry represents a single line from a Kiro .jsonl session file.
+type sessionLogEntry struct {
+	Version string         `json:"version"`
+	Kind    string         `json:"kind"`
+	Data    sessionLogData `json:"data"`
+}
+
+type sessionLogData struct {
+	MessageID string         `json:"message_id"`
+	Content   []contentBlock `json:"content"`
+	Meta      *sessionMeta   `json:"meta,omitempty"`
+}
+
+type contentBlock struct {
+	Kind string `json:"kind"`
+	Data string `json:"data"`
+}
+
+type sessionMeta struct {
+	Timestamp int64 `json:"timestamp"`
+}
+
+// sessionMetadata is parsed from the .json sidecar file for each session.
+type sessionMetadata struct {
+	SessionID string `json:"session_id"`
+	CWD       string `json:"cwd"`
+	CreatedAt string `json:"created_at"`
+	Title     string `json:"title"`
+}
+
+func runSessionIngest(ctx context.Context, store *memory.RedisStore, path, track string, baseTags []string, verbose, dryRun bool) {
+	// Collect session files
+	var files []string
+	info, err := os.Stat(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if info.IsDir() {
+		matches, _ := filepath.Glob(filepath.Join(path, "*.jsonl"))
+		files = matches
+	} else {
+		files = []string{path}
+	}
+
+	if len(files) == 0 {
+		fmt.Fprintf(os.Stderr, "No .jsonl session files found at %s\n", path)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Found %d session file(s) to ingest\n", len(files))
+
+	// Build base tags
+	if track != "" {
+		baseTags = append(baseTags, "track:"+track)
+	}
+
+	if dryRun {
+		for _, f := range files {
+			count := countSessionEntries(f)
+			fmt.Printf("  %s (%d entries)\n", filepath.Base(f), count)
+		}
+		return
+	}
+
+	totalIngested := 0
+	for _, file := range files {
+		n, err := ingestSessionFile(ctx, store, file, baseTags, verbose)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  error ingesting %s: %v\n", filepath.Base(file), err)
+			continue
+		}
+		totalIngested += n
+		fmt.Printf("  ✓ %s: %d entries\n", filepath.Base(file), n)
+	}
+
+	fmt.Printf("\nTotal: %d entries ingested\n", totalIngested)
+}
+
+func ingestSessionFile(ctx context.Context, store *memory.RedisStore, filePath string, baseTags []string, verbose bool) (int, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	sessionID := strings.TrimSuffix(filepath.Base(filePath), ".jsonl")
+
+	// Try to load session metadata from sidecar .json
+	var meta *sessionMetadata
+	metaPath := strings.TrimSuffix(filePath, ".jsonl") + ".json"
+	if metaData, err := os.ReadFile(metaPath); err == nil {
+		var m sessionMetadata
+		if json.Unmarshal(metaData, &m) == nil {
+			meta = &m
 		}
 	}
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
+	count := 0
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(strings.TrimSpace(string(line))) == 0 {
+			continue
+		}
+
+		var logEntry sessionLogEntry
+		if err := json.Unmarshal(line, &logEntry); err != nil {
+			continue
+		}
+
+		// Only ingest user prompts and assistant messages
+		if logEntry.Kind != "Prompt" && logEntry.Kind != "AssistantMessage" {
+			continue
+		}
+
+		// Extract text content
+		var content strings.Builder
+		for _, block := range logEntry.Data.Content {
+			if block.Kind == "text" {
+				content.WriteString(block.Data)
+			}
+		}
+		if content.Len() == 0 {
+			continue
+		}
+
+		// Build tags
+		entryTags := make([]string, len(baseTags))
+		copy(entryTags, baseTags)
+		entryTags = append(entryTags, "session:"+sessionID)
+
+		switch logEntry.Kind {
+		case "Prompt":
+			entryTags = append(entryTags, "kind:prompt")
+		case "AssistantMessage":
+			entryTags = append(entryTags, "kind:assistantmessage")
+		}
+
+		if meta != nil && meta.CWD != "" {
+			entryTags = append(entryTags, "cwd:"+meta.CWD)
+		}
+
+		// Determine timestamp
+		var ts time.Time
+		if logEntry.Data.Meta != nil && logEntry.Data.Meta.Timestamp > 0 {
+			ts = time.Unix(logEntry.Data.Meta.Timestamp, 0)
+		} else if meta != nil && meta.CreatedAt != "" {
+			ts, _ = time.Parse(time.RFC3339, meta.CreatedAt)
+		} else {
+			ts = time.Now()
+		}
+
+		// Add date tag
+		entryTags = append(entryTags, "date:"+ts.Format("2006-01-02"))
+
+		entryID := fmt.Sprintf("%s:%s", sessionID, logEntry.Data.MessageID)
+
+		entry := memory.Entry{
+			ID:        entryID,
+			Timestamp: ts,
+			Content:   content.String(),
+			Tags:      entryTags,
+		}
+
+		if err := store.Put(ctx, entry); err != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "    error storing %s: %v\n", entryID, err)
+			}
+			continue
+		}
+		count++
+
+		if verbose && count%50 == 0 {
+			fmt.Printf("    ...%d entries\n", count)
+		}
+	}
+
+	return count, scanner.Err()
+}
+
+func countSessionEntries(filePath string) int {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+
+	count := 0
+	for scanner.Scan() {
+		var entry sessionLogEntry
+		if json.Unmarshal(scanner.Bytes(), &entry) == nil {
+			if entry.Kind == "Prompt" || entry.Kind == "AssistantMessage" {
+				count++
+			}
+		}
+	}
+	return count
 }

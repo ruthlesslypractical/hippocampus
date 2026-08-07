@@ -1,3 +1,10 @@
+hippocampus (2.0.2-1) oracular; urgency=medium
+
+  * Add hippocampus-slack.service systemd unit (was missing from packaging)
+  * Several other fixes that are too shameful to mention
+
+ -- Theron Bair <tbair@ruthlesslypractical.com>  Tue, 29 Jul 2026 15:55:00 -0800
+
 hippocampus (2.0.0-1) oracular; urgency=medium
 
   * Recall v2: tiered injection (full/summary/breadcrumb), track weighting, relevance floor

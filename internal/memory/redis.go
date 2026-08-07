@@ -295,6 +295,72 @@ func (s *RedisStore) Search(ctx context.Context, query string, limit int) ([]Sea
 	return allResults, nil
 }
 
+// SearchWithOptions performs full-text search with optional sort order, tag filters, and time bounds.
+// When SortBy is "timestamp_asc" or "timestamp_desc", FT.SEARCH uses SORTBY timestamp.
+// FilterTags are applied as @tags:{tag1|tag2...} filter (intersection via multiple clauses).
+// After/Before constrain the @timestamp numeric range.
+func (s *RedisStore) SearchWithOptions(ctx context.Context, query string, limit int, opts SearchOptions) ([]SearchResult, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+
+	// Build the FT.SEARCH query with filters
+	ftQuery := query
+
+	// Add tag filter: each tag becomes its own @tags:{tag} clause (AND logic)
+	for _, tag := range opts.FilterTags {
+		// Escape special RediSearch characters in tag values
+		escaped := util.EscapeRedisTag(tag)
+		ftQuery += fmt.Sprintf(" @tags:{%s}", escaped)
+	}
+
+	// Add timestamp range filter
+	if opts.After > 0 || opts.Before > 0 {
+		min := "-inf"
+		max := "+inf"
+		if opts.After > 0 {
+			min = fmt.Sprintf("%d", opts.After)
+		}
+		if opts.Before > 0 {
+			max = fmt.Sprintf("%d", opts.Before)
+		}
+		ftQuery += fmt.Sprintf(" @timestamp:[%s %s]", min, max)
+	}
+
+	// Build FT.SEARCH args
+	args := []interface{}{"FT.SEARCH", ftIndexName, ftQuery}
+
+	// Add SORTBY if not relevance
+	switch opts.SortBy {
+	case "timestamp_asc":
+		args = append(args, "SORTBY", "timestamp", "ASC")
+	case "timestamp_desc":
+		args = append(args, "SORTBY", "timestamp", "DESC")
+	}
+
+	args = append(args, "LIMIT", "0", fmt.Sprintf("%d", limit))
+
+	res, err := s.client.Do(ctx, args...).Result()
+	if err != nil {
+		// Fall back to basic Search if FT.SEARCH fails
+		return s.Search(ctx, query, limit)
+	}
+
+	results, _ := parseSearchResults(res)
+
+	// Hydrate entries
+	for i := range results {
+		if results[i].Entry.Content == "" && results[i].Entry.ID != "" {
+			entry, err := s.Get(ctx, results[i].Entry.ID)
+			if err == nil {
+				results[i].Entry = entry
+			}
+		}
+	}
+
+	return results, nil
+}
+
 // parseVSIMResults parses the VSIM response into SearchResults.
 // RESP2: [element1, score1, element2, score2, ...]
 // RESP3: map[string]float64 (element → score)
@@ -555,6 +621,110 @@ func (s *RedisStore) Recent(ctx context.Context, limit int) ([]Entry, error) {
 	}
 
 	return s.getEntries(ctx, ids, limit, 0)
+}
+
+// SessionContext returns entries surrounding a given entry within the same session.
+// It finds the session tag on the target entry, fetches all session members,
+// sorts them chronologically, and returns a window of `before` entries before
+// the target and `after` entries after it, plus the target itself.
+func (s *RedisStore) SessionContext(ctx context.Context, id string, before, after int) ([]Entry, error) {
+	// Get the target entry to find its session tag
+	entry, err := s.Get(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("entry not found: %w", err)
+	}
+
+	// Extract session tag
+	var sessionTag string
+	for _, tag := range entry.Tags {
+		if strings.HasPrefix(tag, "session:") {
+			sessionTag = tag
+			break
+		}
+	}
+	if sessionTag == "" {
+		return nil, fmt.Errorf("entry %s has no session tag", id)
+	}
+
+	// Get all entry IDs in this session
+	memberIDs, err := s.client.SMembers(ctx, tagPrefix+sessionTag).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch session members: %w", err)
+	}
+
+	if len(memberIDs) == 0 {
+		return []Entry{entry}, nil
+	}
+
+	// Get timeline scores (timestamps) for all members via pipeline
+	pipe := s.client.Pipeline()
+	scoreCmds := make(map[string]*redis.FloatCmd, len(memberIDs))
+	for _, mid := range memberIDs {
+		scoreCmds[mid] = pipe.ZScore(ctx, timelineKey, mid)
+	}
+	pipe.Exec(ctx)
+
+	// Build sorted list of (id, timestamp)
+	type idScore struct {
+		id    string
+		score float64
+	}
+	sorted := make([]idScore, 0, len(memberIDs))
+	for _, mid := range memberIDs {
+		cmd := scoreCmds[mid]
+		if cmd.Err() != nil {
+			continue
+		}
+		sorted = append(sorted, idScore{id: mid, score: cmd.Val()})
+	}
+
+	// Sort chronologically (ascending)
+	for i := 1; i < len(sorted); i++ {
+		for j := i; j > 0 && sorted[j].score < sorted[j-1].score; j-- {
+			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+		}
+	}
+
+	// Find target's position
+	targetIdx := -1
+	for i, s := range sorted {
+		if s.id == id {
+			targetIdx = i
+			break
+		}
+	}
+	if targetIdx == -1 {
+		// Target not in timeline but exists — just return it
+		return []Entry{entry}, nil
+	}
+
+	// Compute window bounds
+	start := targetIdx - before
+	if start < 0 {
+		start = 0
+	}
+	end := targetIdx + after + 1
+	if end > len(sorted) {
+		end = len(sorted)
+	}
+
+	// Fetch entries in the window
+	windowIDs := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		windowIDs = append(windowIDs, sorted[i].id)
+	}
+
+	// getEntries fetches but doesn't guarantee order, so fetch and reorder
+	entries := make([]Entry, 0, len(windowIDs))
+	for _, wid := range windowIDs {
+		e, err := s.Get(ctx, wid)
+		if err != nil {
+			continue
+		}
+		entries = append(entries, e)
+	}
+
+	return entries, nil
 }
 
 func (s *RedisStore) Link(ctx context.Context, idA, idB string, score float64, relationType string) error {

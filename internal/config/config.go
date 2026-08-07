@@ -6,6 +6,7 @@ package config
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -70,9 +71,30 @@ func (c *RedisConfig) NewRedisClient() *redis.Client {
 		PoolSize:    c.PoolSize,
 	}
 	if c.TLS {
-		opts.TLSConfig = &tls.Config{
+		tlsCfg := &tls.Config{
 			InsecureSkipVerify: c.TLSInsecure,
 		}
+
+		// Load custom CA cert for server verification
+		if c.TLSCA != "" {
+			caCert, err := os.ReadFile(c.TLSCA)
+			if err == nil {
+				pool := x509.NewCertPool()
+				if pool.AppendCertsFromPEM(caCert) {
+					tlsCfg.RootCAs = pool
+				}
+			}
+		}
+
+		// Load client certificate (mTLS)
+		if c.TLSCert != "" && c.TLSKey != "" {
+			cert, err := tls.LoadX509KeyPair(c.TLSCert, c.TLSKey)
+			if err == nil {
+				tlsCfg.Certificates = []tls.Certificate{cert}
+			}
+		}
+
+		opts.TLSConfig = tlsCfg
 	}
 	return redis.NewClient(opts)
 }
@@ -114,6 +136,8 @@ type OllamaConfig struct {
 	MaxRetries          int    `json:"max_retries"`           // Retries per generation after wedge/failure (default 2)
 	EmbeddingModel      string `json:"embedding_model"`       // e.g. nomic-embed-text (for vector search)
 	EmbeddingDimensions int    `json:"embedding_dimensions"`  // vector dimensions (default 768)
+	CACertPath          string `json:"ca_cert"`               // path to PEM CA bundle for TLS (e.g. /etc/pki/tls/certs/private-ca.pem)
+	TLSInsecure         bool   `json:"tls_insecure"`          // skip TLS verification (not recommended)
 }
 
 // IngestConfig holds web ingestion pipeline settings.
@@ -302,6 +326,16 @@ type DaemonConfig struct {
 	Verifier          SubsystemConfig `json:"verifier"`
 	Linker            SubsystemConfig `json:"linker"`
 	Condenser         CondenserConfig `json:"condenser"`
+	TSA               TSAConfig       `json:"tsa"`
+}
+
+// TSAConfig controls RFC 3161 timestamping of memory entries.
+type TSAConfig struct {
+	Enabled    bool   `json:"enabled"`              // enable/disable TSA timestamping
+	URL        string `json:"url"`                  // TSA endpoint (default "https://rfc3161.ai.moda")
+	BatchSize  int    `json:"batch_size"`           // entries per Merkle block (default 256)
+	IntervalS  int    `json:"interval_s"`           // seconds between TSA runs (default 3600 = hourly)
+	HashAlgo   string `json:"hash_algo"`            // "sha256" (default) or "sha512"
 }
 
 // CondenserConfig controls per-message condensation (summary generation for individual entries).

@@ -6,9 +6,11 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"strings"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/ruthlesslypractical/hippocampus/internal/config"
+	"github.com/ruthlesslypractical/hippocampus/internal/embedding"
 	"github.com/ruthlesslypractical/hippocampus/internal/epistemic"
 	"github.com/ruthlesslypractical/hippocampus/internal/logging"
 	"github.com/ruthlesslypractical/hippocampus/internal/ollama"
@@ -75,10 +78,10 @@ func main() {
 	slog.Debug("ollama endpoints", "classifier", classifyURL+"/"+classifyModel, "extractor", extractURL+"/"+extractModel, "verifier", verifyURL+"/"+verifyModel, "linker", linkerURL+"/"+linkerModel)
 
 	clients := &ollamaClients{
-		Classifier: ollama.New(classifyURL, classifyModel, cfg.Ollama.TimeoutMinutes),
-		Extractor:  ollama.New(extractURL, extractModel, cfg.Ollama.TimeoutMinutes),
-		Verifier:   ollama.New(verifyURL, verifyModel, cfg.Ollama.TimeoutMinutes),
-		Linker:     ollama.New(linkerURL, linkerModel, cfg.Ollama.TimeoutMinutes),
+		Classifier: ollama.NewFromConfig(classifyURL, classifyModel, cfg.Ollama.CACertPath, cfg.Ollama.TLSInsecure, cfg.Ollama.TimeoutMinutes),
+		Extractor:  ollama.NewFromConfig(extractURL, extractModel, cfg.Ollama.CACertPath, cfg.Ollama.TLSInsecure, cfg.Ollama.TimeoutMinutes),
+		Verifier:   ollama.NewFromConfig(verifyURL, verifyModel, cfg.Ollama.CACertPath, cfg.Ollama.TLSInsecure, cfg.Ollama.TimeoutMinutes),
+		Linker:     ollama.NewFromConfig(linkerURL, linkerModel, cfg.Ollama.CACertPath, cfg.Ollama.TLSInsecure, cfg.Ollama.TimeoutMinutes),
 	}
 
 	// Connect to Redis
@@ -104,6 +107,14 @@ func main() {
 	}
 	slog.Info("redis connected", "addr", cfg.Redis.Addr)
 
+	// Create embedder (nil if not configured)
+	embedder := embedding.NewEmbedder(cfg.Ollama)
+	if embedder != nil {
+		slog.Info("embedder enabled", "model", cfg.Ollama.EmbeddingModel)
+	} else {
+		slog.Info("embedder disabled (no embedding_model configured)")
+	}
+
 	// Config reload function
 	reloadConfig := func() config.DaemonConfig {
 		fresh, err := config.Load(cfgPath)
@@ -119,11 +130,25 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runDispatcher(ctx, rdb, &cfg, reloadConfig, clients)
+		runDispatcher(ctx, rdb, &cfg, reloadConfig, clients, embedder)
 		// If dispatcher returns (e.g., binary self-update), cancel context
 		// so main() unblocks and the process exits cleanly.
 		cancel()
 	}()
+
+	// Embedding backfill: run once at startup to catch entries without vectors.
+	// Low priority, rate-limited, cancellable.
+	if embedder != nil {
+		go runEmbedBackfill(ctx, rdb, embedder)
+	}
+
+	// TSA timestamping: periodically hash-backfill entries and submit Merkle blocks.
+	go runTSALoop(ctx, rdb, cfg.Daemon.TSA)
+
+
+
+	// Auto-generate track manifests if missing or stale
+	ensureTrackManifests(ctx, rdb)
 
 	// Wait for shutdown signal OR dispatcher self-exit
 	sigCh := make(chan os.Signal, 1)
@@ -171,7 +196,7 @@ func (j jobType) String() string {
 
 // runDispatcher is the unified priority scheduler.
 // It fills GPU slots with the highest-priority available work.
-func runDispatcher(ctx context.Context, rdb *redis.Client, cfg *config.Config, reloadConfig func() config.DaemonConfig, clients *ollamaClients) {
+func runDispatcher(ctx context.Context, rdb *redis.Client, cfg *config.Config, reloadConfig func() config.DaemonConfig, clients *ollamaClients, embedder *embedding.Embedder) {
 	// One-time migration: convert old ZSET links (link:<id>) to new HASH format (links:<id>)
 	migrateLegacyLinks(ctx, rdb)
 
@@ -283,7 +308,7 @@ func runDispatcher(ctx context.Context, rdb *redis.Client, cfg *config.Config, r
 			switch jt {
 			case jobLiveIngest:
 				slog.Info("processing", "job", jt, "entry_id", entryID)
-				jobErr = processEntry(ctx, rdb, cfg, entryID, dc, clients)
+				jobErr = processEntry(ctx, rdb, cfg, entryID, dc, clients, embedder)
 				if jobErr != nil {
 					slog.Error("job failed", "job", jt, "entry_id", entryID, "err", jobErr)
 				}
@@ -292,11 +317,13 @@ func runDispatcher(ctx context.Context, rdb *redis.Client, cfg *config.Config, r
 				runInlineVerify(ctx, rdb, cfg, entryID, clients.Verifier)
 			case jobBacklog:
 				slog.Info("processing", "job", jt, "entry_id", entryID)
-				jobErr = processEntry(ctx, rdb, cfg, entryID, dc, clients)
+				jobErr = processEntry(ctx, rdb, cfg, entryID, dc, clients, embedder)
 				if jobErr != nil {
 					slog.Error("job failed", "job", jt, "entry_id", entryID, "err", jobErr)
+					// Don't mark as processed — allow retry on next backlog pass
+				} else {
+					markProcessed(ctx, rdb, entryID)
 				}
-				markProcessed(ctx, rdb, entryID)
 			case jobCondense:
 				slog.Debug("condensing entry", "job", jt, "entry_id", entryID)
 				runCondense(ctx, rdb, cfg, entryID, clients.Linker)
@@ -867,7 +894,7 @@ func abs(x float64) float64 {
 }
 
 // processEntry runs the full ingestion pipeline on a single entry.
-func processEntry(ctx context.Context, rdb *redis.Client, cfg *config.Config, entryID string, daemonCfg config.DaemonConfig, clients *ollamaClients) error {
+func processEntry(ctx context.Context, rdb *redis.Client, cfg *config.Config, entryID string, daemonCfg config.DaemonConfig, clients *ollamaClients, embedder *embedding.Embedder) error {
 	// Skip system infrastructure entries — orientations, working sets, manifests.
 	// These are not conversation content and should never be classified, extracted, or linked.
 	if strings.HasPrefix(entryID, "meta:") || strings.HasPrefix(entryID, "entry:meta:") {
@@ -940,6 +967,22 @@ func processEntry(ctx context.Context, rdb *redis.Client, cfg *config.Config, en
 	if daemonCfg.Linker.Enabled {
 		linkFromCoRecall(ctx, rdb, cfg, entryID)
 		linkTemporalNeighbors(ctx, rdb, cfg, entryID)
+	}
+
+	// 4. Vector embedding (if embedder configured)
+	if embedder != nil {
+		go func() {
+			vec, err := embedder.Embed(content)
+			if err != nil || vec == nil {
+				slog.Debug("embedding failed", "entry_id", entryID, "error", err)
+				return
+			}
+			blob := vecToBytes(vec)
+			tags, _ := rdb.HGet(context.Background(), "entry:"+entryID, "tags").Result()
+			attrs := fmt.Sprintf(`{"tags":"%s"}`, strings.ReplaceAll(tags, `"`, `\"`))
+			rdb.Do(context.Background(), "VADD", "hippocampus:vectors", "FP32", blob, entryID, "SETATTR", attrs)
+			slog.Debug("embedded", "entry_id", entryID)
+		}()
 	}
 
 	// Publish activity for UI status display
@@ -1862,4 +1905,170 @@ func migrateLegacyLinks(ctx context.Context, rdb *redis.Client) {
 	}
 
 	slog.Info("legacy link migration phase 2: complete", "keys_deleted", deleted2, "links_migrated", migrated2)
+}
+
+// vecToBytes converts a float32 slice to little-endian binary for Redis VADD FP32 format.
+func vecToBytes(vec []float32) []byte {
+	buf := make([]byte, len(vec)*4)
+	for i, v := range vec {
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(v))
+	}
+	return buf
+}
+
+// runEmbedBackfill iterates timeline entries and embeds any that don't have vectors yet.
+// Runs at startup, low priority, rate-limited to avoid overwhelming Ollama.
+func runEmbedBackfill(ctx context.Context, rdb *redis.Client, embedder *embedding.Embedder) {
+	// Wait a bit for startup to settle
+	time.Sleep(30 * time.Second)
+
+	slog.Info("embed backfill starting")
+
+	// Get all entry IDs from timeline
+	ids, err := rdb.ZRange(ctx, "timeline", 0, -1).Result()
+	if err != nil {
+		slog.Error("embed backfill: failed to read timeline", "error", err)
+		return
+	}
+
+	embedded := 0
+	skipped := 0
+	failed := 0
+
+	for _, id := range ids {
+		select {
+		case <-ctx.Done():
+			slog.Info("embed backfill cancelled", "embedded", embedded, "skipped", skipped)
+			return
+		default:
+		}
+
+		// Check if already has a vector (VGETATTR returns error if not present)
+		_, err := rdb.Do(ctx, "VGETATTR", "hippocampus:vectors", id).Result()
+		if err == nil {
+			skipped++
+			continue // already embedded
+		}
+
+		// Load content
+		content, err := rdb.HGet(ctx, "entry:"+id, "content").Result()
+		if err != nil || content == "" {
+			skipped++
+			continue
+		}
+
+		// Skip very short entries (not worth embedding)
+		if len(content) < 20 {
+			skipped++
+			continue
+		}
+
+		// Embed
+		vec, err := embedder.Embed(content)
+		if err != nil || vec == nil {
+			failed++
+			// Rate limit on failure (Ollama might be busy)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		// Store vector
+		blob := vecToBytes(vec)
+		tags, _ := rdb.HGet(ctx, "entry:"+id, "tags").Result()
+		attrs := fmt.Sprintf(`{"tags":"%s"}`, strings.ReplaceAll(tags, `"`, `\"`))
+		rdb.Do(ctx, "VADD", "hippocampus:vectors", "FP32", blob, id, "SETATTR", attrs)
+		embedded++
+
+		// Rate limit: ~2 embeddings per second (nomic is fast, but be polite)
+		time.Sleep(500 * time.Millisecond)
+
+		// Progress log every 100
+		if embedded%100 == 0 {
+			slog.Info("embed backfill progress", "embedded", embedded, "skipped", skipped, "failed", failed, "remaining", len(ids)-embedded-skipped-failed)
+		}
+	}
+
+	slog.Info("embed backfill complete", "embedded", embedded, "skipped", skipped, "failed", failed, "total", len(ids))
+}
+
+// ensureTrackManifests auto-generates the track manifests entry if it doesn't exist,
+// or updates it with any new tracks discovered via tag scanning.
+// The manifest maps track names to descriptions used by the classifier.
+func ensureTrackManifests(ctx context.Context, rdb *redis.Client) {
+	key := "entry:meta:track-manifests"
+
+	// Load existing manifest (if any)
+	existing := make(map[string]string)
+	content, err := rdb.HGet(ctx, key, "content").Result()
+	if err == nil && content != "" {
+		json.Unmarshal([]byte(content), &existing)
+	}
+
+	// Discover tracks from tag sets (track: and track_auto: prefixes)
+	allTags, err := rdb.SMembers(ctx, "tags:all").Result()
+	if err != nil {
+		slog.Warn("ensureTrackManifests: failed to read tags", "error", err)
+		return
+	}
+
+	discovered := make(map[string]bool)
+	for _, tag := range allTags {
+		if strings.HasPrefix(tag, "track:") {
+			name := strings.TrimPrefix(tag, "track:")
+			// Skip meta-ish names
+			if name != "" && !strings.Contains(name, ":") {
+				discovered[name] = true
+			}
+		}
+		if strings.HasPrefix(tag, "track_auto:") {
+			name := strings.TrimPrefix(tag, "track_auto:")
+			if name != "" && !strings.Contains(name, ":") {
+				discovered[name] = true
+			}
+		}
+	}
+
+	// Add any new tracks not already in the manifest
+	updated := false
+	for name := range discovered {
+		if _, exists := existing[name]; !exists {
+			// Auto-generate a placeholder description from the track name
+			existing[name] = fmt.Sprintf("Project track: %s", name)
+			updated = true
+			slog.Info("track manifest: added new track", "track", name)
+		}
+	}
+
+	if !updated && len(existing) > 0 {
+		slog.Debug("track manifests up to date", "tracks", len(existing))
+		return
+	}
+
+	if len(existing) == 0 {
+		slog.Warn("no tracks discovered, skipping manifest generation")
+		return
+	}
+
+	// Write updated manifest
+	jsonBytes, err := json.Marshal(existing)
+	if err != nil {
+		slog.Error("ensureTrackManifests: marshal failed", "error", err)
+		return
+	}
+
+	pipe := rdb.Pipeline()
+	pipe.HSet(ctx, key, map[string]interface{}{
+		"id":        "meta:track-manifests",
+		"content":   string(jsonBytes),
+		"tags":      "meta",
+		"timestamp": fmt.Sprintf("%d", time.Now().Unix()),
+	})
+	pipe.SAdd(ctx, "tag:meta", "meta:track-manifests")
+	pipe.SAdd(ctx, "tags:all", "meta")
+	if _, err := pipe.Exec(ctx); err != nil {
+		slog.Error("ensureTrackManifests: write failed", "error", err)
+		return
+	}
+
+	slog.Info("track manifests updated", "tracks", len(existing))
 }
