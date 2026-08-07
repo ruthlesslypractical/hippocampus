@@ -144,6 +144,31 @@ Generates condensed summaries for individual entries. Runs as a daemon subsystem
 | `daemon.condenser.ollama.base_url` | *(inherit)* | Override Ollama endpoint for condensation |
 | `daemon.condenser.ollama.model` | *(inherit)* | Override model for condensation |
 
+### TSA (RFC 3161 Timestamping)
+
+Cryptographic integrity verification for memory entries. The daemon periodically computes content hashes for entries and submits Merkle block roots to an RFC 3161 Time Stamp Authority. On recall, the MCP server verifies entry integrity against stored hashes.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `daemon.tsa.enabled` | `false` | Enable/disable TSA timestamping |
+| `daemon.tsa.url` | `"https://rfc3161.ai.moda"` | RFC 3161 TSA endpoint URL |
+| `daemon.tsa.batch_size` | `256` | Entries per Merkle block |
+| `daemon.tsa.interval_s` | `3600` | Seconds between TSA runs (default: hourly) |
+| `daemon.tsa.hash_algo` | `"sha256"` | Hash algorithm (only sha256 currently supported) |
+
+**How it works:**
+
+1. **Hash backfill** — Each cycle, entries without a `content_hash` field get one computed: `SHA-256(id + "\n" + content + "\n" + timestamp)`. Skips `meta:*` and `summary:*` entries.
+
+2. **Merkle stamp** — Up to `batch_size` unhashed entries are collected into a sorted Merkle tree. The root is submitted to the TSA via RFC 3161. The signed timestamp response (TSR) is stored as a `tsa:<block_id>` entry with the full proof data.
+
+3. **Recall-time verification** — When the MCP server returns entries (via `memory_get`, `memory_search`, `memory_by_tags`, `memory_recent`, `memory_time_range`, `memory_session_context`), it recomputes the hash and compares to the stored `content_hash`. Entries gain an `integrity` field:
+   - `"verified"` — hash matches stored content_hash
+   - `"unattested"` — no content_hash yet (candidate for backfill)
+   - `"FAILED"` — hash mismatch (possible tampering)
+
+**Startup delay:** The TSA loop waits 60 seconds after daemon start before its first cycle, allowing other subsystems to settle.
+
 ### Daemon-level Ollama Override
 
 Applies to all subsystems that don't have their own override:
